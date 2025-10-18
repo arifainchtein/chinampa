@@ -1,7 +1,7 @@
 #include "Arduino.h"
-#include "DHTesp.h" // Click here to get the library: http://librarymanager/All#DHTesp
 #include <LittleFS.h>
-#include <SeedlingMonitoringWifiManager.h>
+#include <NewPing.h>
+#include <ChinampaWifiManager.h>
 #include <Timer.h>
 #include <PCF8563TimeManager.h>
 #include <Esp32SecretManager.h>
@@ -10,12 +10,12 @@
 #include <TM1637Display.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "DHTesp.h"
-#include <SeedlingMonitoringData.h>
+
+#include <ChinampaData.h>
 #include <sha1.h>
 #include <totp.h>
 #include <LoRa.h>
-#include "DHTesp.h"
+
 #include <Wire.h>
 
 #define UI_CLK 23
@@ -25,8 +25,20 @@
 #define NUM_LEDS 8
 #define OP_MODE 34
 #define RTC_BATT_VOLT 36
+#define FISH_TANK_OUTFLOW_FLOW_METER 39
+#define TANK_LEVEL_TRIGGER 5
+#define TANK_LEVEL_ECHO 5
+#define TANK_LEVEL_MAX_DISTANCE 60  // in cm
+NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_MAX_DISTANCE); // NewPing setup of pins and maximum distance.
+
+
+
+#define FISH_OUTPUT_SOLENOID_RELAY 18
+
+
 #define LED_PIN 19
 #define RELAY_PIN 32
+#define RTC_CLK_OUT 4
 
 #define SCK 14
 #define MOSI 13
@@ -47,23 +59,23 @@ int delayTime = 10;
 bool loraActive = false;
 bool opmode = false;
 String serialNumber;
-DHTesp dht;
+
 uint8_t secondsSinceLastDataSampling = 0;
 PCF8563TimeManager timeManager(Serial);
 GeneralFunctions generalFunctions;
 Esp32SecretManager secretManager(timeManager);
-SeedlingMonitorCommandData seedlingMonitorCommandData;
-SeedlingMonitorConfigData seedlingMonitorConfigData;
+ChinampaCommandData chinampaCommandData;
+ChinampaConfigData chinampaConfigData;
 bool isHost = true;
-SeedlingMonitorData seedlingMonitorData;
+ChinampaData chinampaData;
 Timer dsUploadTimer(30);
 bool uploadToDigitalStables = false;
 bool internetAvailable;
 #define uS_TO_S_FACTOR 60000000 /* Conversion factor for micro seconds to minutes */
 
 uint8_t currentFunctionValue = 10;
-SeedlingMonitoringWifiManager wifiManager(Serial,LittleFS, timeManager, secretManager, seedlingMonitorData);
-bool readDHT = false;
+ChinampaWifiManager wifiManager(Serial,LittleFS, timeManager, secretManager, chinampaData,chinampaConfigData);
+
 float operatingStatus = 3;
 bool wifiActive = false;
 bool apActive = false;
@@ -77,7 +89,7 @@ RTCInfoRecord currentTimerRecord;
 #define TIME_RECORD_REFRESH_SECONDS 3
 volatile bool clockTicked = false;
 #define UNIQUE_ID_SIZE 8
-#define RTC_CLK_OUT 4
+
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 //String display1TempURL = "http://Tlaloc.local/TeleonomeServlet?formName=GetDeneWordValueByIdentity&identity=Tlaloc:Purpose:Sensor%20Data:Indoor%20Temperature:Indoor%20Temperature%20Data";
@@ -86,15 +98,17 @@ String display1TempURL = "http://192.168.1.117/TeleonomeServlet?formName=GetDene
 /********************************************************************/
 
 #define TEMPERATURE 27
-#define SENSOR_INPUT_2 18
+
 #define MIN_HUMIDITY 60
 #define MAX_HUMIDITY 70
-int dhtPin = 5 ;
 /********************************************************************/
 // Setup a oneWire instance to communicate with any OneWire devices
 // (not just Maxim/Dallas temperature ICs)
-OneWire oneWire(SENSOR_INPUT_2);
-DallasTemperature outdoorTempSensor(&oneWire);
+
+
+volatile int flowMeterPulseCount = 0;
+const float calibrationFactor = 450.0; //for YF-G1
+
 
 OneWire oneWire2(TEMPERATURE);
 DallasTemperature microTempSensor(&oneWire2);
@@ -118,6 +132,14 @@ void IRAM_ATTR clockTick() {
   portEXIT_CRITICAL_ISR(&mux);
 }
 
+
+ void IRAM_ATTR  fishTankOutflowPulseCounter()
+{
+  flowMeterPulseCount++;
+}
+
+
+
 //
 // end of interrupt functions
 //
@@ -128,8 +150,8 @@ void IRAM_ATTR clockTick() {
 void onReceive(int packetSize) {
   if (packetSize == 0) return;  // if there's no packet, return
   if (packetSize == sizeof(PanchoCommandData)) {
-    LoRa.readBytes((uint8_t *)&seedlingMonitorCommandData, sizeof(SeedlingMonitorCommandData));
-    long commandcode = seedlingMonitorCommandData.commandcode;
+    LoRa.readBytes((uint8_t *)&chinampaCommandData, sizeof(ChinampaCommandData));
+    long commandcode = chinampaCommandData.commandcode;
     bool validCode = secretManager.checkCode(commandcode);
     if (validCode) {
 
@@ -138,21 +160,21 @@ void onReceive(int packetSize) {
 
       int rssi = LoRa.packetRssi();
       float Snr = LoRa.packetSnr();
-      Serial.println(" Receive seedlingMonitorCommandData: ");
+      Serial.println(" Receive chinampaCommandData: ");
       Serial.print(" Field Id: ");
-      Serial.print(seedlingMonitorCommandData.fieldId);
+      Serial.print(chinampaCommandData.fieldId);
       Serial.print(" commandcode: ");
-      Serial.print(seedlingMonitorCommandData.commandcode);
+      Serial.print(chinampaCommandData.commandcode);
 
     } else {
-      Serial.print(" Receive seedlingMonitorCommandData but invalid code: ");
+      Serial.print(" Receive chinampaCommandData but invalid code: ");
       Serial.println(commandcode);
-      Serial.print(seedlingMonitorCommandData.fieldId);
+      Serial.print(chinampaCommandData.fieldId);
     }
   } else {
     badPacketCount++;
-    Serial.print("Received  invalid data seedlingMonitorCommandData data, expected: ");
-    Serial.print(sizeof(SeedlingMonitorCommandData));
+    Serial.print("Received  invalid data chinampaCommandData data, expected: ");
+    Serial.print(sizeof(ChinampaCommandData));
     Serial.print("  received");
     Serial.println(packetSize);
   }
@@ -160,7 +182,7 @@ void onReceive(int packetSize) {
 
 void sendMessage() {
   LoRa.beginPacket();  // start packet
-  LoRa.write((uint8_t *)&seedlingMonitorData, sizeof(SeedlingMonitorData));
+  LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
   LoRa.endPacket();  // finish packet and send it
   msgCount++;        // increment message ID
 }
@@ -244,43 +266,47 @@ int processDisplayValue(double valueF, struct DisplayData *displayData) {
 
 void readSensorData(){
 
-    // Reading temperature for humidity takes about 250 milliseconds!
-  // Sensor readings may also be up to 2 seconds 'old' (it's a very slow sensor)
-  TempAndHumidity newValues = dht.getTempAndHumidity();
-  // Check if any reads failed and exit early (to try again).
-  if (dht.getStatus() != 0) {
-    Serial.println("DHT11 error status: " + String(dht.getStatusString()));
-  }
+  //
+  // read the fish tank water height
+  //
+   float distance = fish_tank_height_sensor.ping_cm();
+   chinampaData.measuredHeight = distance;
+   chinampaData.fishTankAvailablePercentage = distance * 100 / TANK_LEVEL_MAX_DISTANCE;
 
-  float heatIndex = dht.computeHeatIndex(newValues.temperature, newValues.humidity);
-  float dewPoint = dht.computeDewPoint(newValues.temperature, newValues.humidity);
-  seedlingMonitorData.greenhouseTemp=newValues.temperature;
-  seedlingMonitorData.greenhouseHum=newValues.humidity;
+  //
+  // read the fish tank outflow flow
+  //
+   unsigned long currentTime = millis();
+  unsigned long timeElapsed = currentTime - lastFlowReadTime;
   
+  // Disable interrupt while reading
+  detachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER));
+  
+  // Store pulse count and reset
+  int currentPulseCount = flowMeterPulseCount;
+  flowMeterPulseCount = 0;
+  
+  // Re-enable interrupt
+  attachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER), fishTankOutflowPulseCounter, RISING);
+  
+  // Calculate flow rate in L/min
+  // (pulses / calibration factor) = liters
+  // (liters / seconds) * 60 = L/min
+  float litersFlowed = currentPulseCount / FLOW_CALIBRATION_FACTOR;
+  chinampaData.fishtankoutflowflowRate = (litersFlowed / (timeElapsed / 1000.0)) * 60.0;
+  
+  // Add to total volume
+  fishTankTotalOutflow += litersFlowed;
+  
+  // Update last read time
+  lastFlowReadTime = currentTime;
 
-    
-   Serial.println(" T:" + String(newValues.temperature) + " H:" + String(newValues.humidity) + " Heat Index:" + String(heatIndex) + " Dew Point:" + String(dewPoint) );
-  if(newValues.humidity<MIN_HUMIDITY){
-    digitalWrite(RELAY_PIN, HIGH);
-    seedlingMonitorData.humidifierstatus=true;
-  
-  }else if(newValues.humidity>MAX_HUMIDITY){
-    seedlingMonitorData.humidifierstatus=false;
-    digitalWrite(RELAY_PIN, LOW);
-  }
+ 
   
   microTempSensor.requestTemperatures();  // Send the command to get temperatures
-  seedlingMonitorData.temperature = microTempSensor.getTempCByIndex(0);
-  Serial.println(" Outdoor T:" + String(seedlingMonitorData.temperature) );
+  chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
+  Serial.println(" Outdoor T:" + String(chinampaData.temperature) );
 
- outdoorTempSensor.requestTemperatures();  // Send the command to get temperatures
-  seedlingMonitorData.outdoorTemperature = outdoorTempSensor.getTempCByIndex(0);
-  Serial.println(" Outdoor T:" + String(seedlingMonitorData.outdoorTemperature) );
-;
-
-
-
-  
     //
     // RTC_BATT_VOLT Voltage
     //
@@ -296,10 +322,10 @@ void readSensorData(){
     float voltage = (average / 4095.0) * Vref;
     // Calculate the actual voltage using the voltage divider formula
    // float rtcBatVoltage = (voltage * (R1 + R2)) / R2;
-    seedlingMonitorData.rtcBatVolt = (voltage * (R1 + R2)) / R2;
+    chinampaData.rtcBatVolt = (voltage * (R1 + R2)) / R2;
 
-    seedlingMonitorData.rssi = 0;
-    seedlingMonitorData.snr = 0;
+    chinampaData.rssi = 0;
+    chinampaData.snr = 0;
     //wifiManager.setSensorString(sensorData);
 
     
@@ -338,7 +364,7 @@ void restartWifi()
   wifiManager.restartWifi();
  
   bool stationmode = wifiManager.getStationMode();
-  seedlingMonitorData.internetAvailable = wifiManager.getInternetAvailable();
+  chinampaData.internetAvailable = wifiManager.getInternetAvailable();
   //     digitalWrite(WATCHDOG_WDI, HIGH);
   //    delay(2);
   //    digitalWrite(WATCHDOG_WDI, LOW);
@@ -377,7 +403,7 @@ void restartWifi()
   //    delay(2);
   //    digitalWrite(WATCHDOG_WDI, LOW);
 
-  seedlingMonitorData.loraActive = loraActive;
+  chinampaData.loraActive = loraActive;
   uint8_t ipl = ipAddress.length() + 1;
   char ipa[ipl];
   ipAddress.toCharArray(ipa, ipl);
@@ -389,12 +415,22 @@ void restartWifi()
  // Serial.println("in ino Done starting wifi");
 }
 
+
+
+
 void setup() {
   Serial.begin(115200);
   Wire.begin();
-  dht.setup(dhtPin, DHTesp::DHT22);
+ 
+  
+   pinMode(FISH_TANK_OUTFLOW_FLOW_METER, INPUT_PULLUP);
+   flowMeterPulseCount = 0;
+   flowRate = 0.0;
+  flowMilliLitres = 0;
+  totalMilliLitres = 0;
+  flowMeterPreviousMillis = 0;
+  xxx attachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER), fishTankOutflowPulseCounter, FALLING);
 
-  Serial.println("DHT initiated");
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
   for (int i = 0; i < NUM_LEDS; i++) {
     leds[i] = CRGB(255, 255, 0);
@@ -412,12 +448,12 @@ void setup() {
   timeManager.start();
   timeManager.PCF8563osc1Hz();
   currentTimerRecord = timeManager.now();
-  seedlingMonitorData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
+  chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
   String deviceshortname="SEED";
-  deviceshortname.toCharArray(seedlingMonitorData.deviceshortname, deviceshortname.length() + 1);
+  deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortname.length() + 1);
 
   String devicename="Seedling Monitor";
-  devicename.toCharArray(seedlingMonitorData.devicename, devicename.length() + 1);
+  devicename.toCharArray(chinampaData.devicename, devicename.length() + 1);
   
   microTempSensor.begin();
   uint8_t address[8];
@@ -430,7 +466,7 @@ void setup() {
   Serial.print("serial number:");
   Serial.println(serialNumber);
 
-  outdoorTempSensor.begin();
+
   microTempSensor.begin();
 
 
@@ -448,21 +484,21 @@ void setup() {
   leds[2] = CRGB(255, 255, 0);
   FastLED.show();
   const uint8_t lora[] = {
-    SEG_F | SEG_E | SEG_D,                         // L
-    SEG_E | SEG_G | SEG_C | SEG_D,                 // o
-    SEG_E | SEG_G,                                 // r
-    SEG_A | SEG_B | SEG_C | SEG_E | SEG_F | SEG_G  // A
+    TSEG_F | TSEG_E | TSEG_D,                         // L
+    TSEG_E | TSEG_G | TSEG_C | TSEG_D,                 // o
+    TSEG_E | TSEG_G,                                 // r
+    TSEG_A | TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G  // A
   };
 
   const uint8_t on[] = {
-    SEG_E | SEG_G | SEG_C | SEG_D,  // o
-    SEG_C | SEG_E | SEG_G           // n
+    TSEG_E | TSEG_G | TSEG_C | TSEG_D,  // o
+    TSEG_C | TSEG_E | TSEG_G           // n
   };
 
   const uint8_t off[] = {
-    SEG_E | SEG_G | SEG_C | SEG_D,  // o
-    SEG_A | SEG_G | SEG_E | SEG_F,  // F
-    SEG_A | SEG_G | SEG_E | SEG_F   // F
+    TSEG_E | TSEG_G | TSEG_C | TSEG_D,  // o
+    TSEG_A | TSEG_G | TSEG_E | TSEG_F,  // F
+    TSEG_A | TSEG_G | TSEG_E | TSEG_F   // F
   };
 
   display1.setSegments(lora, 4, 0);
@@ -487,7 +523,7 @@ void setup() {
   display1.clear();
   display2.clear();
 
-  seedlingMonitorData.currentFunctionValue = currentFunctionValue;
+  chinampaData.currentFunctionValue = currentFunctionValue;
 
   //tankAndFlowSensorController.begin(currentFunctionValue);
 
@@ -495,14 +531,14 @@ void setup() {
   String grp = "9slwJcM9";//secretManager.getGroupIdentifier();
   char gprid[16];
   grp.toCharArray(gprid, 16);
-  strcpy(seedlingMonitorData.groupidentifier, gprid);
+  strcpy(chinampaData.groupidentifier, gprid);
 
-  String identifier = "SeedlingMonitor";
+  String identifier = "Chinampa";
   char ty[25];
   identifier.toCharArray(ty, 25);
-  strcpy(seedlingMonitorData.deviceTypeId, ty);
+  strcpy(chinampaData.deviceTypeId, ty);
 
-  seedlingMonitorConfigData.fieldId = secretManager.getFieldId();
+  chinampaConfigData.fieldId = secretManager.getFieldId();
 
   if (!initiatedWifi){
    // Serial.print(F("Before Starting Wifi cap="));
@@ -514,13 +550,13 @@ void setup() {
 
   
   bool stationmode = wifiManager.getStationMode();
-   seedlingMonitorData.internetAvailable = wifiManager.getInternetAvailable();
+   chinampaData.internetAvailable = wifiManager.getInternetAvailable();
  
   Serial.print("Starting wifi stationmode=");
   Serial.print(stationmode);
 
    Serial.print("  internetAvailable=");
-  Serial.println(seedlingMonitorData.internetAvailable);
+  Serial.println(chinampaData.internetAvailable);
   
 
   //  serialNumber = wifiManager.getMacAddress();
@@ -566,7 +602,7 @@ void setup() {
   display2.showNumberDec(0, false);
   requestTempTime = millis();
   readSensorData();
-      readDHT = true;
+     
   dsUploadTimer.start();
   Serial.println("Ok-Ready");
 }
@@ -581,7 +617,7 @@ void loop() {
     secondsSinceLastDataSampling++;
     currentTimerRecord = timeManager.now();
     wifiManager.setCurrentTimerRecord(currentTimerRecord);
-    seedlingMonitorData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
+    chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
     //Serial.println("secondsSinceLastDataSampling=" +  String(secondsSinceLastDataSampling));
     
     dsUploadTimer.tick();
@@ -614,7 +650,7 @@ void loop() {
 
     Serial.print("totp=");
     Serial.print(code);
-    seedlingMonitorData.dsLastUpload = timeVal;
+    chinampaData.dsLastUpload = timeVal;
 
     wifiManager.setCurrentToTpCode(code);
     bool uploadok = wifiManager.uploadDataToDigitalStables();
@@ -630,7 +666,7 @@ void loop() {
 
    
 
-  if (secondsSinceLastDataSampling >= seedlingMonitorData.dataSamplingSec) {
+  if (secondsSinceLastDataSampling >= chinampaData.dataSamplingSec) {
     if (loraActive) {
       leds[1] = CRGB(0, 255, 0);
     }
@@ -644,7 +680,7 @@ void loop() {
    
   }
 
-  if(seedlingMonitorData.humidifierstatus){
+  if(chinampaData.humidifierstatus){
     leds[5] = CRGB(0, 0, 255);
     leds[6] = CRGB(0, 0, 255);
     leds[7] = CRGB(0, 0, 255);
@@ -661,8 +697,8 @@ void loop() {
     FastLED.show();
 
     const uint8_t hu[] = {
-      SEG_B | SEG_C | SEG_E | SEG_F | SEG_G,
-      SEG_B | SEG_C | SEG_E | SEG_F | SEG_D,
+      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G,
+      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_D,
       0,                                             
       0   
     };
@@ -677,7 +713,7 @@ void loop() {
       }
     }
     display1.setSegments(hu, 2, 0);
-    int hi = (int)(seedlingMonitorData.greenhouseHum * 100);
+    int hi = (int)(chinampaData.greenhouseHum * 100);
     display2.showNumberDecEx(hi, (0x80 >> 1), false);
 
     
@@ -686,8 +722,8 @@ void loop() {
    // leds[4] = CRGB(0, 255, 0);
     FastLED.show();
     const uint8_t t[] = {
-      SEG_F | SEG_E | SEG_D | SEG_G,  // t
-      SEG_A | SEG_D | SEG_E | SEG_F | SEG_G,   //E
+      TSEG_F | TSEG_E | TSEG_D | TSEG_G,  // t
+      TSEG_A | TSEG_D | TSEG_E | TSEG_F | TSEG_G,   //E
       0,                                             
       0  
     };
@@ -696,25 +732,25 @@ void loop() {
       display1.clear();
     }
     display1.setSegments(t, 2, 0);
-    int tempi = (int)(seedlingMonitorData.greenhouseTemp * 100);
+    int tempi = (int)(chinampaData.greenhouseTemp * 100);
     display2.showNumberDecEx(tempi, (0x80 >> 1), false);
     
   } else if (currentTimerRecord.second == 20  || currentTimerRecord.second == 50 ) {
     
     const uint8_t t2[] = {
-      SEG_F | SEG_E | SEG_D | SEG_A| SEG_B| SEG_C,  // O
+      TSEG_F | TSEG_E | TSEG_D | TSEG_A| TSEG_B| TSEG_C,  // O
       0x00,
-      SEG_F | SEG_E | SEG_D | SEG_G,  // t
-      SEG_A | SEG_D | SEG_E | SEG_F| SEG_G   //E
+      TSEG_F | TSEG_E | TSEG_D | TSEG_G,  // t
+      TSEG_A | TSEG_D | TSEG_E | TSEG_F| TSEG_G   //E
     };
     Serial.print("Sensor1=");
-    Serial.println(seedlingMonitorData.temperature);
+    Serial.println(chinampaData.temperature);
     if(cleareddisplay1){
       cleareddisplay1=false;
       display1.clear();
     }
     display1.setSegments(t2, 4, 0);
-    int value1 = processDisplayValue(seedlingMonitorData.temperature, &displayData);
+    int value1 = processDisplayValue(chinampaData.temperature, &displayData);
     if (displayData.dp > 0) {
       display2.showNumberDecEx(value1, (0x80 >> displayData.dp), false);
     } else {
@@ -938,8 +974,8 @@ void setStationMode(String ipAddress) {
   leds[0] = CRGB(0, 0, 255);
   FastLED.show();
   const uint8_t ip[] = {
-    SEG_F | SEG_E,                         // I
-    SEG_F | SEG_G | SEG_A | SEG_B | SEG_E  // P
+    TSEG_F | TSEG_E,                         // I
+    TSEG_F | TSEG_G | TSEG_A | TSEG_B | TSEG_E  // P
   };
   uint8_t ipi;
   for (int i = 0; i < 4; i++) {
@@ -962,8 +998,8 @@ void setApMode() {
   Serial.println("settting AP mode, address ");
   Serial.println(apAddress);
   const uint8_t ap[] = {
-    SEG_F | SEG_G | SEG_A | SEG_B | SEG_C | SEG_E,  // A
-    SEG_F | SEG_G | SEG_A | SEG_B | SEG_E           // P
+    TSEG_F | TSEG_G | TSEG_A | TSEG_B | TSEG_C | TSEG_E,  // A
+    TSEG_F | TSEG_G | TSEG_A | TSEG_B | TSEG_E           // P
   };
   display1.setSegments(ap, 2, 0);
   delay(1000);
