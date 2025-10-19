@@ -30,22 +30,18 @@
 #define TANK_LEVEL_ECHO 5
 #define TANK_LEVEL_MAX_DISTANCE 60  // in cm
 NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_MAX_DISTANCE); // NewPing setup of pins and maximum distance.
-
-
-
-#define FISH_OUTPUT_SOLENOID_RELAY 18
-
-
 #define LED_PIN 19
-#define RELAY_PIN 32
+#define PUMP_RELAY_PIN 32
+#define FISH_OUTPUT_SOLENOID_RELAY 18
 #define RTC_CLK_OUT 4
-
 #define SCK 14
 #define MOSI 13
 #define MISO 12
 #define LoRa_SS 15
 #define LORA_RESET 16
 #define LORA_DI0 17
+
+
 int badPacketCount = 0;
 byte msgCount = 0;         // count of outgoing messages
 byte localAddress = 0xFF;  // address of this device
@@ -89,12 +85,14 @@ RTCInfoRecord currentTimerRecord;
 #define TIME_RECORD_REFRESH_SECONDS 3
 volatile bool clockTicked = false;
 #define UNIQUE_ID_SIZE 8
-
+unsigned long lastFlowReadTime = 0;
+const float FLOW_CALIBRATION_FACTOR = 450.0;
+float fishTankTotalOutflow=0.0;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 //String display1TempURL = "http://Tlaloc.local/TeleonomeServlet?formName=GetDeneWordValueByIdentity&identity=Tlaloc:Purpose:Sensor%20Data:Indoor%20Temperature:Indoor%20Temperature%20Data";
 String display1TempURL = "http://192.168.1.117/TeleonomeServlet?formName=GetDeneWordValueByIdentity&identity=Tlaloc:Purpose:Sensor%20Data:Indoor%20Temperature:Indoor%20Temperature%20Data";
-
+String timezone;
 /********************************************************************/
 
 #define TEMPERATURE 27
@@ -272,7 +270,40 @@ void readSensorData(){
    float distance = fish_tank_height_sensor.ping_cm();
    chinampaData.measuredHeight = distance;
    chinampaData.fishTankAvailablePercentage = distance * 100 / TANK_LEVEL_MAX_DISTANCE;
+  
+  Serial.println("fishTankAvailablePercentage=" + String(chinampaData.fishTankAvailablePercentage));
+   Serial.println("minimumFishTankHeight=" + String(chinampaData.minimumFishTankHeight));
+   if(chinampaData.fishTankAvailablePercentage<chinampaData.minimumFishTankHeight){
+    //
+    // close the fish tank solenoid and turn the pump on
+    //
+    digitalWrite(PUMP_RELAY_PIN, HIGH);
+    digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+    leds[6] = CRGB(0, 255, 0);
+    leds[7] = CRGB(0, 0, 0);    
+    FastLED.show();
+        Serial.println("point 1");
+   }else if(chinampaData.fishTankAvailablePercentage>=chinampaData.minimumFishTankHeight && chinampaData.fishTankAvailablePercentage<=chinampaData.maximumFishTankHeight){
+    //
+    // everything active
+    //
+     digitalWrite(PUMP_RELAY_PIN, HIGH);
+     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+     leds[6] = CRGB(0, 255, 0);
+     leds[7] = CRGB(0, 255, 0);    
+     FastLED.show();
 
+    Serial.println("point 2");
+   }else if(chinampaData.fishTankAvailablePercentage>chinampaData.maximumFishTankHeight){
+      // 
+      // open the fish tankflow but turn off the pump
+     digitalWrite(PUMP_RELAY_PIN, LOW);
+     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+     leds[6] = CRGB(0, 0, 0);
+     leds[7] = CRGB(0, 255, 0);    
+     FastLED.show();
+     Serial.println("point 3");
+   }
   //
   // read the fish tank outflow flow
   //
@@ -305,7 +336,7 @@ void readSensorData(){
   
   microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
-  Serial.println(" Outdoor T:" + String(chinampaData.temperature) );
+  Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
 
     //
     // RTC_BATT_VOLT Voltage
@@ -421,15 +452,23 @@ void restartWifi()
 void setup() {
   Serial.begin(115200);
   Wire.begin();
+
+ //
+  // data from cofiguration
+  //
+  double latitude = -37.13305556;
+  double longitude = 144.47472222;
  
+  secretManager.getDeviceConfig(chinampaData.devicename, chinampaData.deviceshortname, timezone, latitude, longitude);
+
   
    pinMode(FISH_TANK_OUTFLOW_FLOW_METER, INPUT_PULLUP);
    flowMeterPulseCount = 0;
-   flowRate = 0.0;
-  flowMilliLitres = 0;
-  totalMilliLitres = 0;
-  flowMeterPreviousMillis = 0;
-  xxx attachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER), fishTankOutflowPulseCounter, FALLING);
+   chinampaData.fishtankoutflowflowRate = 0.0;
+ // flowMilliLitres = 0;
+//  totalMilliLitres = 0;
+ // flowMeterPreviousMillis = 0;
+  attachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER), fishTankOutflowPulseCounter, FALLING);
 
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -441,6 +480,10 @@ void setup() {
   display2.setBrightness(0x0f);
   display1.clear();
   display2.clear();
+ 
+  pinMode(PUMP_RELAY_PIN, OUTPUT);  // set up interrupt%20Pin
+  pinMode(FISH_OUTPUT_SOLENOID_RELAY, OUTPUT); 
+ 
   pinMode(RTC_CLK_OUT, INPUT_PULLUP);  // set up interrupt%20Pin
   digitalWrite(RTC_CLK_OUT, HIGH);     // turn on pullup resistors
   // attach interrupt%20To set_tick_tock callback on rising edge of INT0
@@ -523,8 +566,6 @@ void setup() {
   display1.clear();
   display2.clear();
 
-  chinampaData.currentFunctionValue = currentFunctionValue;
-
   //tankAndFlowSensorController.begin(currentFunctionValue);
 
   operatingStatus = secretManager.getOperatingStatus();
@@ -585,8 +626,7 @@ void setup() {
 
   pinMode(RTC_BATT_VOLT, INPUT);
   pinMode(OP_MODE, INPUT_PULLUP);
- // pinMode(SENSOR_INPUT_3, INPUT);
-  pinMode(RELAY_PIN, OUTPUT);
+
 
 
   opmode = digitalRead(OP_MODE);
@@ -670,87 +710,67 @@ void loop() {
     if (loraActive) {
       leds[1] = CRGB(0, 255, 0);
     }
-
-    
     FastLED.show();
     readSensorData();
     secondsSinceLastDataSampling = 0;
-   
-
-   
   }
-
-  if(chinampaData.humidifierstatus){
-    leds[5] = CRGB(0, 0, 255);
-    leds[6] = CRGB(0, 0, 255);
-    leds[7] = CRGB(0, 0, 255);
-  }else{
-    leds[5] = CRGB(0, 0, 0);
-    leds[6] = CRGB(0, 0, 0);
-    leds[7] = CRGB(0, 0, 0);    
-  }
-    FastLED.show();
-
   
+  
+  FastLED.show();
   if (currentTimerRecord.second == 0 || currentTimerRecord.second == 30) {
    // leds[5] = CRGB(0, 255, 0);
     FastLED.show();
-
-    const uint8_t hu[] = {
-      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G,
-      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_D,
-      0,                                             
-      0   
+    const uint8_t fish[] = {
+      TSEG_A | TSEG_E | TSEG_F | TSEG_G,  // F
+       TSEG_E | TSEG_F,  // I
+      TSEG_A | TSEG_C | TSEG_D | TSEG_F | TSEG_G,  // S                                                
+      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G  // H                                                
     };
     if(cleareddisplay1){
       cleareddisplay1=false;
       display1.clear();
-
       if (loraActive) {
         sendMessage();
         leds[1] = CRGB(0, 0, 255);
         FastLED.show();
       }
     }
-    display1.setSegments(hu, 2, 0);
-    int hi = (int)(chinampaData.greenhouseHum * 100);
-    display2.showNumberDecEx(hi, (0x80 >> 1), false);
-
-    
+    display1.setSegments(fish, 4, 0);
+    int fishtanklevel = (int)(chinampaData.fishTankAvailablePercentage * 100);
+    display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
 
   } else if (currentTimerRecord.second == 10 || currentTimerRecord.second == 40) {
    // leds[4] = CRGB(0, 255, 0);
     FastLED.show();
-    const uint8_t t[] = {
-      TSEG_F | TSEG_E | TSEG_D | TSEG_G,  // t
-      TSEG_A | TSEG_D | TSEG_E | TSEG_F | TSEG_G,   //E
-      0,                                             
-      0  
+    const uint8_t fflo[] = {
+      TSEG_A | TSEG_F | TSEG_E | TSEG_G,  // F
+      TSEG_A | TSEG_F | TSEG_E | TSEG_G,  // F
+      TSEG_D | TSEG_E | TSEG_F,   //L
+      TSEG_C | TSEG_D | TSEG_E | TSEG_G  // o                                           
     };
     if(cleareddisplay1){
       cleareddisplay1=false;
       display1.clear();
     }
-    display1.setSegments(t, 2, 0);
-    int tempi = (int)(chinampaData.greenhouseTemp * 100);
-    display2.showNumberDecEx(tempi, (0x80 >> 1), false);
+    display1.setSegments(fflo, 4, 0);
+    int ftfr = (int)(chinampaData.fishtankoutflowflowRate * 100);
+    display2.showNumberDecEx(ftfr, (0x80 >> 1), false);
     
   } else if (currentTimerRecord.second == 20  || currentTimerRecord.second == 50 ) {
     
     const uint8_t t2[] = {
-      TSEG_F | TSEG_E | TSEG_D | TSEG_A| TSEG_B| TSEG_C,  // O
+      TSEG_B | TSEG_C | TSEG_D | TSEG_E| TSEG_F,  // U
       0x00,
       TSEG_F | TSEG_E | TSEG_D | TSEG_G,  // t
       TSEG_A | TSEG_D | TSEG_E | TSEG_F| TSEG_G   //E
     };
-    Serial.print("Sensor1=");
-    Serial.println(chinampaData.temperature);
+    
     if(cleareddisplay1){
       cleareddisplay1=false;
       display1.clear();
     }
     display1.setSegments(t2, 4, 0);
-    int value1 = processDisplayValue(chinampaData.temperature, &displayData);
+    int value1 = processDisplayValue(chinampaData.microtemperature, &displayData);
     if (displayData.dp > 0) {
       display2.showNumberDecEx(value1, (0x80 >> displayData.dp), false);
     } else {
@@ -765,8 +785,63 @@ void loop() {
     Serial.println(command);
     if (command.startsWith("Ping")) {
       Serial.println(F("Ok-Ping"));
+     
+    }else if(command.startsWith("GetDeviceConfig")){
+      // double latitude = 0.0;
+     // double longitude = 0.0;
+     String timezoneStr = "AEST-10AEDT,M10.1.0,M4.1.0/3";  
+       double latitude = -37.13305556;
+  double longitude = 144.47472222;
+      secretManager.getDeviceConfig(chinampaData.devicename, chinampaData.deviceshortname, timezoneStr, latitude,longitude);
+      Serial.print(chinampaData.devicename);
+      Serial.print("#");
+      Serial.print(chinampaData.deviceshortname);
+      Serial.print("#");
+      Serial.print(timezoneStr);
+      Serial.print("#");
+      Serial.print(chinampaData.latitude);
+      Serial.print("#");
+      Serial.print(chinampaData.longitude);
+      Serial.print("#");
+      Serial.println(F("Ok-GetDeviceSensorConfig"));
+    }
+    else if (command.startsWith("SetDeviceConfig"))
+    {
+// SetDeviceSensorConfig#Chinampa #CHIN #AEST-10AEDT,M10.1.0,M4.1.0/3#-37.13305556#144.47472222#
+      String devicename = generalFunctions.getValue(command, '#', 1);
+      String deviceshortname = generalFunctions.getValue(command, '#', 2);
+      String timezone = generalFunctions.getValue(command, '#', 3);
+      Serial.print("deviceshortname=");
+      Serial.println(deviceshortname);
+      double latitude=generalFunctions.stringToDouble(generalFunctions.getValue(command, '#', 4));
+      double longitude=generalFunctions.stringToDouble(generalFunctions.getValue(command, '#', 5));
+        
+      uint8_t devicenamelength = devicename.length() + 1;
+      devicename.toCharArray(chinampaData.devicename, devicenamelength);
+      deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortname.length() + 1);
+     
+      secretManager.saveDeviceConfig(devicename, deviceshortname, timezone, latitude, longitude);
       
-    } else if (command.startsWith("SetGroupId")) {
+      Serial.println(F("Ok-SetDeviceSensorConfig"));
+    }
+    else if (command.startsWith("SetDeviceName"))
+    {
+      String devicename = generalFunctions.getValue(command, '#', 1);
+      uint8_t devicenamelength = devicename.length() + 1;
+      devicename.toCharArray(chinampaData.devicename, devicenamelength);
+      Serial.println(F("Ok-SetDeviceName"));
+    }
+    else if (command.startsWith("SetDeviceShortName"))
+    {
+      String deviceshortname = generalFunctions.getValue(command, '#', 1);
+      uint8_t deviceshortnamelength = deviceshortname.length() + 1;
+      deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortnamelength);
+      Serial.print(F("digitalStablesData.deviceshortname="));
+      Serial.println(chinampaData.deviceshortname);
+      Serial.println(F("Ok-SetDeviceShortName")); 
+    } 
+    else if (command.startsWith("SetGroupId")) 
+    {
       String grpId = generalFunctions.getValue(command, '#', 1);
       secretManager.setGroupIdentifier(grpId);
       Serial.print(F("set group id to "));
@@ -824,14 +899,9 @@ void loop() {
       }
     } else if (command.startsWith("SetTime")) {
       //SetTime#24#10#19#4#17#32#00
-      uint8_t switchState = digitalRead(OP_MODE);
-      if (switchState == LOW) {
         timeManager.setTime(command);
         Serial.println("Ok-SetTime");
-      } else {
-        Serial.println("Failure-SetTime");
-      }
-
+     
     } else if (command.startsWith("SetFieldId")) {
       // fieldId= GeneralFunctions::getValue(command, '#', 1).toInt();
     } else if (command.startsWith("GetTime")) {
