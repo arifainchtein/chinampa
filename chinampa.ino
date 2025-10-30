@@ -10,12 +10,14 @@
 #include <TM1637Display.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-
+#include <DataManager.h>
 #include <ChinampaData.h>
+#include <DigitalStablesData.h>
 #include <sha1.h>
 #include <totp.h>
 #include <LoRa.h>
-
+#include <ErrorDefinitions.h>
+#include <ErrorManager.h>
 #include <Wire.h>
 
 #define UI_CLK 23
@@ -27,7 +29,7 @@
 #define RTC_BATT_VOLT 36
 #define FISH_TANK_OUTFLOW_FLOW_METER 39
 #define TANK_LEVEL_TRIGGER 5
-#define TANK_LEVEL_ECHO 5
+#define TANK_LEVEL_ECHO 35
 #define TANK_LEVEL_MAX_DISTANCE 60  // in cm
 NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_MAX_DISTANCE); // NewPing setup of pins and maximum distance.
 #define LED_PIN 19
@@ -42,6 +44,26 @@ NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_
 #define LORA_DI0 17
 
 
+
+uint8_t displayStatus = 0;
+uint8_t loraLastResult=-99;
+LoRaError cadResult;
+
+ErrorManager errorManager;
+float avgRssi=0;
+#define REG_OP_MODE            0x01
+#define REG_IRQ_FLAGS         0x12
+#define REG_RSSI_VALUE        0x1B
+#define MODE_CAD              0x87
+#define IRQ_CAD_DONE_MASK     0x04
+#define IRQ_CAD_DETECTED_MASK 0x02
+
+#define CAD_TIMEOUT      5000    // CAD timeout in milliseconds
+#define MAX_RETRIES      5       // Maximum transmission retries
+#define MIN_BACKOFF      500     // Minimum backoff time in milliseconds
+#define MAX_BACKOFF      1500    // Maximum backoff time in milliseconds
+#define RSSI_THRESHOLD   -60     // RSSI threshold in dBm
+
 int badPacketCount = 0;
 byte msgCount = 0;         // count of outgoing messages
 byte localAddress = 0xFF;  // address of this device
@@ -55,7 +77,8 @@ int delayTime = 10;
 bool loraActive = false;
 bool opmode = false;
 String serialNumber;
-
+int secondsSinceLastFishTankData=0;
+int secondsSinceLastSumpTroughData=0;
 uint8_t secondsSinceLastDataSampling = 0;
 PCF8563TimeManager timeManager(Serial);
 GeneralFunctions generalFunctions;
@@ -68,7 +91,9 @@ Timer dsUploadTimer(30);
 bool uploadToDigitalStables = false;
 bool internetAvailable;
 #define uS_TO_S_FACTOR 60000000 /* Conversion factor for micro seconds to minutes */
+DataManager dataManager(Serial, LittleFS);
 
+DigitalStablesData fishTankDSD,sumpTroughDSD;
 uint8_t currentFunctionValue = 10;
 ChinampaWifiManager wifiManager(Serial,LittleFS, timeManager, secretManager, chinampaData,chinampaConfigData);
 
@@ -81,7 +106,7 @@ TM1637Display display1(UI_CLK, UI1_DAT);
 TM1637Display display2(UI_CLK, UI2_DAT);
 CRGB leds[NUM_LEDS];
 long lastTimeUpdateMillis = 0;
-RTCInfoRecord currentTimerRecord;
+RTCInfoRecord currentTimerRecord, lastReceptionRTCInfoRecord;
 #define TIME_RECORD_REFRESH_SECONDS 3
 volatile bool clockTicked = false;
 #define UNIQUE_ID_SIZE 8
@@ -106,7 +131,8 @@ String timezone;
 
 volatile int flowMeterPulseCount = 0;
 const float calibrationFactor = 450.0; //for YF-G1
-
+volatile bool loraReceived = false;
+volatile int loraPacketSize = 0;
 
 OneWire oneWire2(TEMPERATURE);
 DallasTemperature microTempSensor(&oneWire2);
@@ -137,7 +163,6 @@ void IRAM_ATTR clockTick() {
 }
 
 
-
 //
 // end of interrupt functions
 //
@@ -145,37 +170,134 @@ void IRAM_ATTR clockTick() {
 //
 // Lora Functions
 //
-void onReceive(int packetSize) {
+
+
+
+void LoRa_rxMode() {
+  LoRa.disableInvertIQ();  // normal mode
+  LoRa.receive();          // set receive mode
+}
+
+void LoRa_txMode() {
+  LoRa.idle();             // set standby mode
+  LoRa.disableInvertIQ();  // normal mode
+}
+
+void IRAM_ATTR onReceive(int packetSize) {
+    loraReceived = true;
+  loraPacketSize = packetSize;
+}
+
+void processLora(int packetSize){
   if (packetSize == 0) return;  // if there's no packet, return
-  if (packetSize == sizeof(PanchoCommandData)) {
-    LoRa.readBytes((uint8_t *)&chinampaCommandData, sizeof(ChinampaCommandData));
-    long commandcode = chinampaCommandData.commandcode;
-    bool validCode = secretManager.checkCode(commandcode);
-    if (validCode) {
+  // Serial.println("Lora received " + String(packetSize));
 
-      //secretManager.saveSleepPingMinutes(rosieConfigData.sleepPingMinutes);
-      //secretManager.saveConfigData(rosieConfigData.fieldId,  stationName );
+    // Serial.println(" DigitalStablesData " + String(sizeof(DigitalStablesData)));
+   //  Serial.println(" SeedlingMonitorData " + String(sizeof(SeedlingMonitorData)));
+     
+  if (packetSize == sizeof(DigitalStablesData)) {
+    boolean validData=false;
+     DigitalStablesData tempData;
+    memset(&tempData, 0, sizeof(DigitalStablesData));
+    LoRa.readBytes((uint8_t*)&tempData, sizeof(DigitalStablesData));
+    //  Serial.println("received from " + String(tempData.devicename));
+    //  dataManager.printDigitalStablesData(tempData);
 
-      int rssi = LoRa.packetRssi();
-      float Snr = LoRa.packetSnr();
-      Serial.println(" Receive chinampaCommandData: ");
-      Serial.print(" Field Id: ");
-      Serial.print(chinampaCommandData.fieldId);
-      Serial.print(" commandcode: ");
-      Serial.print(chinampaCommandData.commandcode);
+      if (strcmp(tempData.devicename, "FISHTANK") == 0) {
+        memcpy(&fishTankDSD, &tempData, sizeof(DigitalStablesData));
+        validData=true;
+        fishTankDSD.rssi = LoRa.packetRssi();
+        fishTankDSD.snr = LoRa.packetSnr();
+        
+        dataManager.storeDigitalStablesData(fishTankDSD);
+        secondsSinceLastFishTankData=0;
+        chinampaData.minimumFishTankLevel=fishTankDSD.troughlevelminimumcm;
+        chinampaData.maximumFishTankLevel=fishTankDSD.troughlevelmaximumcm;
+        chinampaData.fishTankMeasuredHeight=fishTankDSD.measuredHeight;
+        chinampaData.fishTankHeight=fishTankDSD.maximumScepticHeight;
+  
+        Serial.println("Data received from FishTank fishTankMeasuredHeight=" + String(chinampaData.fishTankMeasuredHeight));
+        leds[3] = CRGB(0, 255, 0);
+        FastLED.show();
+      } 
+      else if (strcmp(tempData.devicename, "SumpTrough") == 0) {
+        memcpy(&sumpTroughDSD, &tempData, sizeof(DigitalStablesData));
+         // dataManager.printDigitalStablesData(tempData);
+        sumpTroughDSD.rssi = LoRa.packetRssi();
+        sumpTroughDSD.snr = LoRa.packetSnr();
+        validData=true;
+        secondsSinceLastSumpTroughData=0;
+        chinampaData.minimumSumpTroughLevel=sumpTroughDSD.troughlevelminimumcm;
+        chinampaData.maximumSumpTroughLevel=sumpTroughDSD.troughlevelmaximumcm;
+        chinampaData.sumpTroughMeasuredHeight=sumpTroughDSD.measuredHeight;
+        chinampaData.sumpTroughHeight=sumpTroughDSD.maximumScepticHeight;
 
-    } else {
-      Serial.print(" Receive chinampaCommandData but invalid code: ");
-      Serial.println(commandcode);
-      Serial.print(chinampaCommandData.fieldId);
+  
+        Serial.println("Data received from SumpTrough sumpTroughMeasuredHeight=" + String(chinampaData.sumpTroughMeasuredHeight));
+        leds[4] = CRGB(0, 255, 0);
+          FastLED.show();
+      }
+      if(validData){
+        long messageReceivedTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
+        lastReceptionRTCInfoRecord.year = currentTimerRecord.year;
+        lastReceptionRTCInfoRecord.month = currentTimerRecord.month;
+        lastReceptionRTCInfoRecord.date = currentTimerRecord.date;
+        lastReceptionRTCInfoRecord.hour = currentTimerRecord.hour;
+        lastReceptionRTCInfoRecord.minute = currentTimerRecord.minute;
+        lastReceptionRTCInfoRecord.second = currentTimerRecord.second;
+        FastLED.show();
+      }else{
+
+      }
     }
-  } else {
-    badPacketCount++;
-    Serial.print("Received  invalid data chinampaCommandData data, expected: ");
-    Serial.print(sizeof(ChinampaCommandData));
-    Serial.print("  received");
-    Serial.println(packetSize);
-  }
+}
+LoRaError performCAD() {
+    if (!loraActive) {
+        errorManager.setLoRaError(LORA_INIT_FAILED);
+        return LORA_INIT_FAILED;
+    }
+
+    // Multiple RSSI checks with averaging
+    const int SAMPLES = 3;
+    const int CHECK_DELAY = 2; // ms between samples
+    float rssiSum = 0;
+    // First set of samples
+    LoRa.idle();
+    LoRa.receive();
+    
+    for(int i = 0; i < SAMPLES; i++) {
+        rssiSum += LoRa.rssi();
+        delay(CHECK_DELAY);
+    }
+
+    avgRssi = rssiSum / SAMPLES;
+    
+    // If average RSSI is above threshold, channel is busy
+    if (avgRssi > RSSI_THRESHOLD) {
+        LoRa.idle();
+        errorManager.setLoRaError(LORA_CHANNEL_BUSY);
+        return LORA_CHANNEL_BUSY;
+    }
+
+    // Double-check with a second set of samples
+    rssiSum = 0;
+    for(int i = 0; i < SAMPLES; i++) {
+        rssiSum += LoRa.rssi();
+        delay(CHECK_DELAY);
+    }
+
+    avgRssi = rssiSum / SAMPLES;  
+    LoRa.idle();
+ 
+    Serial.print("checkcad, avgRssi=");
+    Serial.print(avgRssi);
+    if (avgRssi > RSSI_THRESHOLD) {
+       // errorMgr.setLoRaError(LORA_CHANNEL_BUSY, avgRssi);  
+        return LORA_CHANNEL_BUSY;
+    }
+
+    errorManager.clearLoRaError(LORA_CHANNEL_BUSY);  // Clear any previous channel busy error
+    return LORA_OK;
 }
 
 void sendMessage() {
@@ -183,6 +305,56 @@ void sendMessage() {
   LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
   LoRa.endPacket();  // finish packet and send it
   msgCount++;        // increment message ID
+
+
+
+   LoRa_txMode();
+  uint8_t result = 99;
+  int retries = 0;
+  boolean keepGoing = true;
+  long startsendingtime = millis();
+  while (keepGoing) {
+    cadResult = performCAD();
+    if (cadResult == LORA_OK) {
+      // Channel is clear, attempt transmission
+      LoRa.beginPacket();
+      // Send the provided data object
+       LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
+      if (!LoRa.endPacket(true)) {
+        result = LORA_TX_FAILED;
+      } else {
+        result = LORA_OK;
+      }
+      Serial.print("took ");
+      Serial.print(millis() - startsendingtime);
+      keepGoing = false;
+    } else if (cadResult != LORA_CHANNEL_BUSY) {
+      // If error is not due to busy channel, return the error
+      result = cadResult;
+      int backoff = random(MIN_BACKOFF * (1 << retries), MAX_BACKOFF * (1 << retries));
+     
+     Serial.print("Channel busy, retry ");
+     Serial.print(retries + 1);
+      Serial.print(" of ");
+  Serial.print(MAX_RETRIES);
+      Serial.print(". Waiting ");
+      Serial.print(backoff);
+      Serial.println("ms");
+      // Channel is busy, implement exponential backoff
+      delay(backoff);
+      retries++;
+      keepGoing = retries < MAX_RETRIES;
+    }
+  }
+
+  if (result == 99) {
+    result = LORA_MAX_RETRIES_REACHED;
+  }
+ 
+  Serial.print(" ,Lora returns ");
+ Serial.println(result);
+  delay(500);
+  LoRa_rxMode();
 }
 
 //
@@ -267,43 +439,130 @@ void readSensorData(){
   //
   // read the fish tank water height
   //
-   float distance = fish_tank_height_sensor.ping_cm();
-   chinampaData.measuredHeight = distance;
-   chinampaData.fishTankAvailablePercentage = distance * 100 / TANK_LEVEL_MAX_DISTANCE;
+//   float distance = fish_tank_height_sensor.ping_cm();
+//    Serial.println("distance=" + String(distance));
+//   chinampaData.fishTankAvailablePercentage = distance * 100 / TANK_LEVEL_MAX_DISTANCE;
   
-  Serial.println("fishTankAvailablePercentage=" + String(chinampaData.fishTankAvailablePercentage));
-   Serial.println("minimumFishTankHeight=" + String(chinampaData.minimumFishTankHeight));
-   if(chinampaData.fishTankAvailablePercentage<chinampaData.minimumFishTankHeight){
-    //
-    // close the fish tank solenoid and turn the pump on
-    //
-    digitalWrite(PUMP_RELAY_PIN, HIGH);
-    digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
-    leds[6] = CRGB(0, 255, 0);
-    leds[7] = CRGB(0, 0, 0);    
-    FastLED.show();
-        Serial.println("point 1");
-   }else if(chinampaData.fishTankAvailablePercentage>=chinampaData.minimumFishTankHeight && chinampaData.fishTankAvailablePercentage<=chinampaData.maximumFishTankHeight){
-    //
-    // everything active
-    //
-     digitalWrite(PUMP_RELAY_PIN, HIGH);
-     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
-     leds[6] = CRGB(0, 255, 0);
-     leds[7] = CRGB(0, 255, 0);    
-     FastLED.show();
-
-    Serial.println("point 2");
-   }else if(chinampaData.fishTankAvailablePercentage>chinampaData.maximumFishTankHeight){
-      // 
-      // open the fish tankflow but turn off the pump
-     digitalWrite(PUMP_RELAY_PIN, LOW);
-     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
-     leds[6] = CRGB(0, 0, 0);
-     leds[7] = CRGB(0, 255, 0);    
-     FastLED.show();
-     Serial.println("point 3");
+ // Serial.println("fishTankAvailablePercentage=" + String(chinampaData.fishTankAvailablePercentage));
+ // Serial.println("minimumFishTankHeight=" + String(chinampaData.minimumFishTankHeight));
+   boolean keepgoing=true;
+   chinampaData.alertstatus=false;
+   chinampaData.alertcode=0;
+       
+   if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
+       digitalWrite(PUMP_RELAY_PIN, LOW);
+       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+       leds[3] = CRGB(255, 0, 0);
+       leds[5] = CRGB(255, 0, 0);
+       leds[6] = CRGB(255, 0, 0);
+       leds[7] = CRGB(255, 0, 0);   
+       Serial.println("Going red because fish data is stale,secondsSinceLastFishTankData=" + String(secondsSinceLastFishTankData));
+       keepgoing=false; 
+       FastLED.show();
+       chinampaData.alertstatus=true;
+       chinampaData.alertcode=1;
    }
+
+   if(secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+       digitalWrite(PUMP_RELAY_PIN, LOW);
+       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+       leds[4] = CRGB(255, 0, 0);
+       leds[5] = CRGB(255, 0, 0);
+       leds[6] = CRGB(255, 0, 0);
+       leds[7] = CRGB(255, 0, 0);   
+       Serial.println("Going red because fish data is stale,secondsSinceLastFishTankData=" + String(secondsSinceLastFishTankData));
+       keepgoing=false; 
+       FastLED.show();
+       chinampaData.alertstatus=true;
+       chinampaData.alertcode=2;
+   }
+   
+   if(keepgoing){
+      leds[3] = CRGB(0, 255, 0);
+    //  leds[5] = CRGB(0, 255, 0);
+      if(chinampaData.fishTankMeasuredHeight>= (chinampaData.fishTankHeight-chinampaData.minimumFishTankLevel)){
+        //
+        // close the fish tank solenoid
+        //
+        
+        digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+        leds[7] = CRGB(0, 0, 0);    
+        //
+        // now check the pump
+        //
+        if(secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+          digitalWrite(PUMP_RELAY_PIN, LOW);
+          leds[6] = CRGB(255, 0, 0);
+        }else{
+          if(chinampaData.sumpTroughMeasuredHeight>= (chinampaData.sumpTroughHeight-chinampaData.minimumSumpTroughLevel)){
+            digitalWrite(PUMP_RELAY_PIN, LOW);
+            leds[6] = CRGB(0, 0, 0);
+          }else{
+            digitalWrite(PUMP_RELAY_PIN, HIGH);
+            leds[6] = CRGB(0, 255, 0);
+          }
+        
+        Serial.println("line 328 1");
+        keepgoing=false;
+      }
+      FastLED.show();
+    }
+   }
+   
+   if(keepgoing){
+    if (chinampaData.fishTankMeasuredHeight < (chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) && 
+        chinampaData.fishTankMeasuredHeight >= (chinampaData.fishTankHeight - chinampaData.maximumFishTankLevel)){
+        
+      //
+      // everything active
+      //
+      digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+      leds[7] = CRGB(0, 255, 0);  
+      Serial.println("line 502  fisdh tank is green");
+      //
+      // now check the pump
+      //
+      if(secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+        digitalWrite(PUMP_RELAY_PIN, LOW);
+         Serial.println("line 508  sump stale");
+        leds[6] = CRGB(255, 0, 0);
+      }else{
+         if(chinampaData.sumpTroughMeasuredHeight>= (chinampaData.sumpTroughHeight-chinampaData.minimumSumpTroughLevel)){
+          digitalWrite(PUMP_RELAY_PIN, LOW);
+          Serial.println("line 513  sump too low pump off");
+          leds[6] = CRGB(0, 0, 0);
+        }else{
+          digitalWrite(PUMP_RELAY_PIN, HIGH);
+          Serial.println("line 513  sump above min pump on");
+          leds[6] = CRGB(0, 255, 0);
+        }
+      }
+      keepgoing=false;
+      FastLED.show();
+     }
+   }
+
+  if(keepgoing){
+    if(chinampaData.fishTankMeasuredHeight<(chinampaData.fishTankHeight-chinampaData.maximumFishTankLevel)){
+      //
+      // open the fish tankflow 
+      //
+      Serial.println("line 529, fish tank too high");
+      digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+      leds[7] = CRGB(0, 255, 0);  
+
+      // the fish tank is too high, turn the pump off
+      //
+       digitalWrite(PUMP_RELAY_PIN, LOW);
+          leds[6] = CRGB(255, 255, 0);
+        FastLED.show();
+        Serial.println("line 468");
+        keepgoing=false;
+    }
+   }
+  
+     
+  
   //
   // read the fish tank outflow flow
   //
@@ -336,7 +595,7 @@ void readSensorData(){
   
   microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
-  Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
+  //Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
 
     //
     // RTC_BATT_VOLT Voltage
@@ -480,7 +739,9 @@ void setup() {
   display2.setBrightness(0x0f);
   display1.clear();
   display2.clear();
- 
+
+  pinMode(TANK_LEVEL_TRIGGER, OUTPUT);
+  pinMode(TANK_LEVEL_ECHO, INPUT); 
   pinMode(PUMP_RELAY_PIN, OUTPUT);  // set up interrupt%20Pin
   pinMode(FISH_OUTPUT_SOLENOID_RELAY, OUTPUT); 
  
@@ -545,7 +806,7 @@ void setup() {
   };
 
   display1.setSegments(lora, 4, 0);
-
+Serial.println("about to start LoRa");
   if (!LoRa.begin(433E6)) {
     Serial.println("Starting LoRa failed!");
     while (1)
@@ -559,7 +820,7 @@ void setup() {
     loraActive = true;
   }
   FastLED.show();
-  delay(1000);
+ // delay(1000);
 
 
 
@@ -627,7 +888,13 @@ void setup() {
   pinMode(RTC_BATT_VOLT, INPUT);
   pinMode(OP_MODE, INPUT_PULLUP);
 
-
+if (loraActive) {
+      // LoRa_rxMode();
+      // LoRa.setSyncWord(0xF3);
+      LoRa.onReceive(onReceive);
+      // put the radio into receive mode
+      LoRa.receive();
+    }
 
   opmode = digitalRead(OP_MODE);
   if (loraActive) {
@@ -641,8 +908,7 @@ void setup() {
   display1.showNumberDec(0, false);
   display2.showNumberDec(0, false);
   requestTempTime = millis();
-  readSensorData();
-     
+ 
   dsUploadTimer.start();
   Serial.println("Ok-Ready");
 }
@@ -658,21 +924,40 @@ void loop() {
     currentTimerRecord = timeManager.now();
     wifiManager.setCurrentTimerRecord(currentTimerRecord);
     chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
-    //Serial.println("secondsSinceLastDataSampling=" +  String(secondsSinceLastDataSampling));
-    
+  //  Serial.println("secondsSinceLastFishTankData=" +  String(secondsSinceLastFishTankData));
+  //  Serial.println("secondsSinceLastSumpTroughData=" +  String(secondsSinceLastSumpTroughData));
+    secondsSinceLastFishTankData++;
+    secondsSinceLastSumpTroughData++;
     dsUploadTimer.tick();
 
     if (currentTimerRecord.second == 0) {
       //Serial.println(F("new minute"));
 
       if (currentTimerRecord.minute == 0) {
-        //		Serial.println(F("New Hour"));
+        //    Serial.println(F("New Hour"));
         if (currentTimerRecord.hour == 0) {
-          //	Serial.println(F("New Day"));
+          //  Serial.println(F("New Day"));
         }
       }
     }
   }
+
+  if (loraReceived) {
+    //Serial.printf("lora recive Free Heap: %d \n", xPortGetFreeHeapSize());
+//    Serial.printf("lora recive loraPacketSize: %d \n", loraPacketSize);
+//    Serial.println("");
+    processLora(loraPacketSize);
+    loraReceived = false;
+//    bool show = false;
+//    currentPalette = RainbowStripeColors_p;
+//    currentBlending = NOBLEND;
+//    if (!inSerial){
+//   //   performLedShow(250);
+//   ledShowDuration = 250;  // Set desired duration in milliseconds
+//    runLedShow = true;    // Set flag to trigger the show
+    
+   
+    }
 
   if (dsUploadTimer.status() && internetAvailable) {
     //char secret[27];
@@ -736,7 +1021,7 @@ void loop() {
       }
     }
     display1.setSegments(fish, 4, 0);
-    int fishtanklevel = (int)(chinampaData.fishTankAvailablePercentage * 100);
+    int fishtanklevel = (int)(chinampaData.fishTankMeasuredHeight * 100);
     display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
 
   } else if (currentTimerRecord.second == 10 || currentTimerRecord.second == 40) {
@@ -786,7 +1071,26 @@ void loop() {
     if (command.startsWith("Ping")) {
       Serial.println(F("Ok-Ping"));
      
-    }else if(command.startsWith("GetDeviceConfig")){
+    }else if (command.startsWith("printLastFishTankData"))
+    {
+      
+      dataManager.printDigitalStablesData(fishTankDSD);
+      Serial.println("Ok-printLastFishTankData");
+      Serial.flush(); 
+    }else if (command.startsWith("printLastSumpTroughData"))
+    {
+      
+      dataManager.printDigitalStablesData(sumpTroughDSD);
+      Serial.println("Ok-printLastFishTankData");
+      Serial.flush(); 
+    }else if (command.startsWith("printCurrentChinampaData"))
+    {
+      
+      dataManager.printChinampaData(chinampaData);
+      Serial.println("Ok-printCurrentDSDData");
+      Serial.flush(); 
+    }
+    else if(command.startsWith("GetDeviceConfig")){
       // double latitude = 0.0;
      // double longitude = 0.0;
      String timezoneStr = "AEST-10AEDT,M10.1.0,M4.1.0/3";  
@@ -973,13 +1277,13 @@ void loop() {
       delay(delayTime);
 
     } else if (command.startsWith("PulseFinished")) {
-      //	inPulse=false;
+      //  inPulse=false;
       Serial.println("Ok-PulseFinished");
       Serial.flush();
       delay(delayTime);
 
     } else if (command.startsWith("IPAddr")) {
-      //	currentIpAddress = generalFunctions.getValue(command, '#', 1);
+      //  currentIpAddress = generalFunctions.getValue(command, '#', 1);
       Serial.println("Ok-IPAddr");
       Serial.flush();
       delay(delayTime);
@@ -1012,7 +1316,7 @@ void loop() {
     } else if (command.startsWith("GetSensorData")) {
 
 
-      //	Serial.print(wiFiManager.getSensorData());
+      //  Serial.print(wiFiManager.getSensorData());
       Serial.flush();
       delay(delayTime);
     } else if (command.startsWith("AsyncData")) {
@@ -1034,6 +1338,7 @@ void loop() {
       Serial.flush();
       delay(delayTime);
     }
+    LoRa_rxMode();
   }
 }
 
