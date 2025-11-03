@@ -448,7 +448,16 @@ void readSensorData(){
    boolean keepgoing=true;
    chinampaData.alertstatus=false;
    chinampaData.alertcode=0;
-       
+
+if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
+   secondsSinceLastFishTankData<=chinampaData.fishTankStaleDataSeconds
+   ){
+     leds[5] = CRGB(0, 0, 0);
+     chinampaData.alertstatus=false;
+       chinampaData.alertcode=99;
+       FastLED.show();
+   }
+   
    if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
        digitalWrite(PUMP_RELAY_PIN, LOW);
        digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
@@ -476,7 +485,13 @@ void readSensorData(){
        chinampaData.alertstatus=true;
        chinampaData.alertcode=2;
    }
-   
+
+   if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds &&
+   secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds
+    ){
+       chinampaData.alertstatus=true;
+       chinampaData.alertcode=2;
+   }
    if(keepgoing){
       leds[3] = CRGB(0, 255, 0);
     //  leds[5] = CRGB(0, 255, 0);
@@ -578,7 +593,7 @@ void readSensorData(){
   
   // Re-enable interrupt
   attachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER), fishTankOutflowPulseCounter, RISING);
-  
+  Serial.println("line 596, currentPulseCount=" + String(currentPulseCount) + " timeElapsed=" + String(timeElapsed));
   // Calculate flow rate in L/min
   // (pulses / calibration factor) = liters
   // (liters / seconds) * 60 = L/min
@@ -910,6 +925,21 @@ if (loraActive) {
   requestTempTime = millis();
  
   dsUploadTimer.start();
+
+  digitalWrite(PUMP_RELAY_PIN, LOW);
+   digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+   leds[3] = CRGB(255, 0, 0);
+   leds[4] = CRGB(255, 0, 0);
+   leds[5] = CRGB(255, 0, 0);
+   leds[6] = CRGB(255, 0, 0);
+   leds[7] = CRGB(255, 0, 0);   
+   Serial.println("Going red because fish data is stale,secondsSinceLastFishTankData=" + String(secondsSinceLastFishTankData));
+   FastLED.show();
+   chinampaData.alertstatus=true;
+   chinampaData.alertcode=0;
+   secondsSinceLastSumpTroughData=99;
+   secondsSinceLastFishTankData=99;
+           
   Serial.println("Ok-Ready");
 }
 
@@ -1014,16 +1044,19 @@ void loop() {
     if(cleareddisplay1){
       cleareddisplay1=false;
       display1.clear();
-      if (loraActive) {
-        sendMessage();
-        leds[1] = CRGB(0, 0, 255);
-        FastLED.show();
-      }
     }
     display1.setSegments(fish, 4, 0);
     int fishtanklevel = (int)(chinampaData.fishTankMeasuredHeight * 100);
     display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
 
+    if (loraActive) {
+        leds[1] = CRGB(0, 0, 255);
+        FastLED.show();
+        sendMessage();
+        leds[1] = CRGB(0, 255, 0);
+        FastLED.show();
+      }
+      
   } else if (currentTimerRecord.second == 10 || currentTimerRecord.second == 40) {
    // leds[4] = CRGB(0, 255, 0);
     FastLED.show();
