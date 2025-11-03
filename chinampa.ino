@@ -111,7 +111,7 @@ RTCInfoRecord currentTimerRecord, lastReceptionRTCInfoRecord;
 volatile bool clockTicked = false;
 #define UNIQUE_ID_SIZE 8
 unsigned long lastFlowReadTime = 0;
-const float FLOW_CALIBRATION_FACTOR = 450.0;
+const float FLOW_CALIBRATION_FACTOR = 63.0;
 float fishTankTotalOutflow=0.0;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -130,7 +130,7 @@ String timezone;
 
 
 volatile int flowMeterPulseCount = 0;
-const float calibrationFactor = 450.0; //for YF-G1
+const float calibrationFactor = 63.0; //for YF-G1
 volatile bool loraReceived = false;
 volatile int loraPacketSize = 0;
 
@@ -593,12 +593,12 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
   
   // Re-enable interrupt
   attachInterrupt(digitalPinToInterrupt(FISH_TANK_OUTFLOW_FLOW_METER), fishTankOutflowPulseCounter, RISING);
-  Serial.println("line 596, currentPulseCount=" + String(currentPulseCount) + " timeElapsed=" + String(timeElapsed));
   // Calculate flow rate in L/min
   // (pulses / calibration factor) = liters
   // (liters / seconds) * 60 = L/min
   float litersFlowed = currentPulseCount / FLOW_CALIBRATION_FACTOR;
   chinampaData.fishtankoutflowflowRate = (litersFlowed / (timeElapsed / 1000.0)) * 60.0;
+  Serial.println("line 596,litersFlowed=" + String(litersFlowed) +"  currentPulseCount=" + String(currentPulseCount) + " timeElapsed=" + String(timeElapsed));
   
   // Add to total volume
   fishTankTotalOutflow += litersFlowed;
