@@ -606,11 +606,28 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
   // Update last read time
   lastFlowReadTime = currentTime;
 
- 
-  
+ chinampaData.fishtankoutPulsePerMinute = 60*(currentPulseCount/(timeElapsed / 1000.0));
+
+
+  if(digitalRead(FISH_OUTPUT_SOLENOID_RELAY) && chinampaData.fishtankoutflowflowRate<2){
+    digitalWrite(PUMP_RELAY_PIN, LOW);
+       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+       leds[3] = CRGB(255, 0, 0);
+       leds[5] = CRGB(255, 0, 0);
+       leds[6] = CRGB(255, 0, 0);
+       leds[7] = CRGB(255, 0, 0);   
+       Serial.println("Going red because fish solenouid is open and the fish opuitflow flow is less less than 2, flow=" + String(chinampaData.fishtankoutflowflowRate));
+       FastLED.show();
+       chinampaData.alertstatus=true;
+       chinampaData.alertcode=4;
+  }
   microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
   //Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
+  if(chinampaData.microtemperature>75){
+     chinampaData.alertstatus=true;
+       chinampaData.alertcode=10;
+  }
 
     //
     // RTC_BATT_VOLT Voltage
@@ -734,8 +751,9 @@ void setup() {
   double longitude = 144.47472222;
  
   secretManager.getDeviceConfig(chinampaData.devicename, chinampaData.deviceshortname, timezone, latitude, longitude);
-
-  
+  double fishq=63;
+  secretManager.getChinampaParameters(fishq);
+  chinampaData.fishtankoutQFactor = fishq;
    pinMode(FISH_TANK_OUTFLOW_FLOW_METER, INPUT_PULLUP);
    flowMeterPulseCount = 0;
    chinampaData.fishtankoutflowflowRate = 0.0;
@@ -1094,6 +1112,24 @@ void loop() {
     } else {
       display2.showNumberDec(value1, false);
     }
+    delay(100);
+  }else if (  chinampaData.alertstatus &&   (currentTimerRecord.second == 25  || currentTimerRecord.second == 55) ) {
+    
+    const uint8_t alrt[] = {
+      TSEG_A | TSEG_B | TSEG_C | TSEG_D| TSEG_E| TSEG_G,  // a
+       TSEG_D | TSEG_E | TSEG_F,  // L
+      TSEG_g | TSEG_D | TSEG_E ,   //r
+      TSEG_F | TSEG_E | TSEG_D | TSEG_G  // t
+      
+    };
+    
+    if(cleareddisplay1){
+      cleareddisplay1=false;
+      display1.clear();
+    }
+    display1.setSegments(alrt, 4, 0);
+    display2.showNumberDec(chinampaData.alertcode, false);
+ }
     delay(100);
   }
 
