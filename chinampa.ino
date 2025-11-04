@@ -1128,7 +1128,7 @@ void loop() {
       display1.clear();
     }
     display1.setSegments(alrt, 4, 0);
-    display2.showNumberDec(chinampaData.alertstatus, false);
+    display2.showNumberDec(chinampaData.alertcode, false);
     delay(100);
   }
 
