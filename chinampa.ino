@@ -1118,7 +1118,7 @@ void loop() {
     const uint8_t alrt[] = {
       TSEG_A | TSEG_B | TSEG_C | TSEG_D| TSEG_E| TSEG_G,  // a
        TSEG_D | TSEG_E | TSEG_F,  // L
-      TSEG_G | TSEG_D | TSEG_E ,   //r
+      TSEG_G | TSEG_E ,   //r
       TSEG_F | TSEG_E | TSEG_D | TSEG_G  // t
       
     };
