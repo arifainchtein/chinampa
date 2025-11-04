@@ -1088,21 +1088,30 @@ void loop() {
       0x00                               
 
     };
+    const uint8_t staL[] = {
+      TSEG_A | TSEG_C | TSEG_D | TSEG_F | TSEG_G,  // S
+      TSEG_F | TSEG_D | TSEG_E | TSEG_G,  // t
+      TSEG_A | TSEG_C | TSEG_D | TSEG_E | TSEG_B | TSEG_G, //a
+      TSEG_D | TSEG_E | TSEG_F   //L   
+    };
+    
     display1.setSegments(fish, 4, 0);
     int fishtanklevel = (int)(chinampaData.fishTankMeasuredHeight * 100);
     //display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
-
-    if (chinampaData.fishTankMeasuredHeight >=(chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) )
+    if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
+      display2.setSegments(staL, 4, 0);
+    }
+    else if (chinampaData.fishTankMeasuredHeight >=(chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) )
     {
-      display1.setSegments(low, 4, 0);
+      display2.setSegments(low, 4, 0);
     }
     else if (chinampaData.fishTankMeasuredHeight < (chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) && chinampaData.fishTankMeasuredHeight >= (chinampaData.fishTankHeight - chinampaData.maximumFishTankLevel))
     {
-      display1.setSegments(good, 4, 0);
+      display2.setSegments(good, 4, 0);
     }
     else if (chinampaData.fishTankMeasuredHeight < (chinampaData.fishTankHeight - chinampaData.maximumFishTankLevel))
     {
-      display1.setSegments(high, 4, 0);
+      display2.setSegments(high, 4, 0);
     }
           
     if (loraActive) {
