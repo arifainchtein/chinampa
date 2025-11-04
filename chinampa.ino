@@ -479,7 +479,7 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
        leds[5] = CRGB(255, 0, 0);
        leds[6] = CRGB(255, 0, 0);
        leds[7] = CRGB(255, 0, 0);   
-       Serial.println("Going red because fish data is stale,secondsSinceLastFishTankData=" + String(secondsSinceLastFishTankData));
+       Serial.println("Going red because secondsSinceLastSumpTroughData data is stale,secondsSinceLastSumpTroughData=" + String(secondsSinceLastSumpTroughData));
        keepgoing=false; 
        FastLED.show();
        chinampaData.alertstatus=true;
