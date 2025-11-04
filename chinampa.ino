@@ -1055,18 +1055,56 @@ void loop() {
     FastLED.show();
     const uint8_t fish[] = {
       TSEG_A | TSEG_E | TSEG_F | TSEG_G,  // F
+      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G,  // H
        TSEG_E | TSEG_F,  // I
-      TSEG_A | TSEG_C | TSEG_D | TSEG_F | TSEG_G,  // S                                                
-      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G  // H                                                
+      TSEG_A | TSEG_C | TSEG_D | TSEG_E | TSEG_F | TSEG_G  // G                                                
+                                            
     };
     if(cleareddisplay1){
       cleareddisplay1=false;
       display1.clear();
     }
+
+     const uint8_t good[] = {
+      TSEG_A | TSEG_C | TSEG_D | TSEG_E | TSEG_F | TSEG_G,   //G
+      TSEG_C | TSEG_D | TSEG_E | TSEG_G,  // o
+      TSEG_C | TSEG_D | TSEG_E | TSEG_G,  // o
+      TSEG_B | TSEG_C | TSEG_D | TSEG_E | TSEG_G  // d                                                
+                                            
+    };
+
+    const uint8_t high[] = {
+      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G,  // H
+       TSEG_E | TSEG_F,  // I
+      TSEG_A | TSEG_C | TSEG_D | TSEG_E | TSEG_F | TSEG_G,  // G    
+      TSEG_B | TSEG_C | TSEG_E | TSEG_F | TSEG_G  // H                                           
+                                            
+    };
+
+    const uint8_t low[] = {
+      TSEG_D | TSEG_E | TSEG_F,   //L
+      TSEG_C | TSEG_D | TSEG_E | TSEG_G,  // o
+      TSEG_C | TSEG_D | TSEG_E,  // u     
+      0x00                               
+
+    };
     display1.setSegments(fish, 4, 0);
     int fishtanklevel = (int)(chinampaData.fishTankMeasuredHeight * 100);
-    display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
+    //display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
 
+    if (chinampaData.fishTankMeasuredHeight >=(chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) )
+    {
+      display1.setSegments(low, 4, 0);
+    }
+    else if (chinampaData.fishTankMeasuredHeight < (chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) && chinampaData.fishTankMeasuredHeight >= (chinampaData.fishTankHeight - chinampaData.maximumFishTankLevel))
+    {
+      display1.setSegments(good, 4, 0);
+    }
+    else if (chinampaData.fishTankMeasuredHeight < (chinampaData.fishTankHeight - chinampaData.maximumFishTankLevel))
+    {
+      display1.setSegments(high, 4, 0);
+    }
+          
     if (loraActive) {
         leds[1] = CRGB(0, 0, 255);
         FastLED.show();
