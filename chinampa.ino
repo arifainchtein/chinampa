@@ -1118,7 +1118,7 @@ void loop() {
     const uint8_t alrt[] = {
       TSEG_A | TSEG_B | TSEG_C | TSEG_D| TSEG_E| TSEG_G,  // a
        TSEG_D | TSEG_E | TSEG_F,  // L
-      TSEG_g | TSEG_D | TSEG_E ,   //r
+      TSEG_G | TSEG_D | TSEG_E ,   //r
       TSEG_F | TSEG_E | TSEG_D | TSEG_G  // t
       
     };
@@ -1128,8 +1128,7 @@ void loop() {
       display1.clear();
     }
     display1.setSegments(alrt, 4, 0);
-    display2.showNumberDec(chinampaData.alertcode, false);
- }
+    display2.showNumberDec(chinampaData.alertstatus, false);
     delay(100);
   }
 
