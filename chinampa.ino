@@ -490,7 +490,7 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
    secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds
     ){
        chinampaData.alertstatus=true;
-       chinampaData.alertcode=2;
+       chinampaData.alertcode=3;
    }
    if(keepgoing){
       leds[3] = CRGB(0, 255, 0);
