@@ -792,10 +792,10 @@ void setup() {
   timeManager.PCF8563osc1Hz();
   currentTimerRecord = timeManager.now();
   chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
-  String deviceshortname="SEED";
+  String deviceshortname="CHIN";
   deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortname.length() + 1);
 
-  String devicename="Seedling Monitor";
+  String devicename="Chinampa";
   devicename.toCharArray(chinampaData.devicename, devicename.length() + 1);
   
   microTempSensor.begin();
@@ -1232,7 +1232,7 @@ void loop() {
     }
     else if (command.startsWith("SetDeviceConfig"))
     {
-// SetDeviceSensorConfig#Chinampa #CHIN #AEST-10AEDT,M10.1.0,M4.1.0/3#-37.13305556#144.47472222#
+// SetDeviceConfig#Chinampa #CHIN #AEST-10AEDT,M10.1.0,M4.1.0/3#-37.13305556#144.47472222#
       String devicename = generalFunctions.getValue(command, '#', 1);
       String deviceshortname = generalFunctions.getValue(command, '#', 2);
       String timezone = generalFunctions.getValue(command, '#', 3);
@@ -1300,7 +1300,7 @@ void loop() {
 
     } else if (command.startsWith("ConfigWifiAP")) {
       //ConfigWifiAP#soft_ap_ssid#soft_ap_password#hostaname
-      //ConfigWifiAP#pancho5##pancho5
+      //ConfigWifiAP#Chinampa##Chinampa
 
       String soft_ap_ssid = generalFunctions.getValue(command, '#', 1);
       String soft_ap_password = generalFunctions.getValue(command, '#', 2);
