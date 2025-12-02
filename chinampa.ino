@@ -190,9 +190,9 @@ void IRAM_ATTR onReceive(int packetSize) {
 
 void processLora(int packetSize){
   if (packetSize == 0) return;  // if there's no packet, return
-  // Serial.println("Lora received " + String(packetSize));
+   Serial.println("Lora received " + String(packetSize));
 
-    // Serial.println(" DigitalStablesData " + String(sizeof(DigitalStablesData)));
+   // Serial.println(" DigitalStablesData " + String(sizeof(DigitalStablesData)));
    //  Serial.println(" SeedlingMonitorData " + String(sizeof(SeedlingMonitorData)));
      
   if (packetSize == sizeof(DigitalStablesData)) {
@@ -200,10 +200,21 @@ void processLora(int packetSize){
      DigitalStablesData tempData;
     memset(&tempData, 0, sizeof(DigitalStablesData));
     LoRa.readBytes((uint8_t*)&tempData, sizeof(DigitalStablesData));
-    //  Serial.println("received from " + String(tempData.devicename));
+    tempData.devicename[sizeof(tempData.devicename) - 1] = '\0';
+     Serial.println("received from " + String(tempData.devicename));
     //  dataManager.printDigitalStablesData(tempData);
 
-      if (strcmp(tempData.devicename, "FISHTANK") == 0) {
+      Serial.print("Device name bytes: ");
+      for(int i = 0; i < sizeof(tempData.devicename); i++) {
+          Serial.print((int)tempData.devicename[i]);
+          Serial.print(" ");
+      }
+      Serial.println();
+      
+      Serial.print("Device name length: ");
+      Serial.println(strlen(tempData.devicename));
+
+      if (strncmp(tempData.devicename, "FISHTANK", 8) == 0) {
         memcpy(&fishTankDSD, &tempData, sizeof(DigitalStablesData));
         validData=true;
         fishTankDSD.rssi = LoRa.packetRssi();
@@ -436,13 +447,7 @@ int processDisplayValue(double valueF, struct DisplayData *displayData) {
 
 void readSensorData(){
 
-  //
-  // read the fish tank water height
-  //
-//   float distance = fish_tank_height_sensor.ping_cm();
-//    Serial.println("distance=" + String(distance));
-//   chinampaData.fishTankAvailablePercentage = distance * 100 / TANK_LEVEL_MAX_DISTANCE;
-  
+   
  // Serial.println("fishTankAvailablePercentage=" + String(chinampaData.fishTankAvailablePercentage));
  // Serial.println("minimumFishTankHeight=" + String(chinampaData.minimumFishTankHeight));
    boolean keepgoing=true;
@@ -609,18 +614,19 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
  chinampaData.fishtankoutPulsePerMinute = 60*(currentPulseCount/(timeElapsed / 1000.0));
 
 
-  if(digitalRead(FISH_OUTPUT_SOLENOID_RELAY) && chinampaData.fishtankoutflowflowRate<2){
-    digitalWrite(PUMP_RELAY_PIN, LOW);
-       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
-       leds[3] = CRGB(255, 0, 0);
-       leds[5] = CRGB(255, 0, 0);
-       leds[6] = CRGB(255, 0, 0);
-       leds[7] = CRGB(255, 0, 0);   
-       Serial.println("Going red because fish solenouid is open and the fish opuitflow flow is less less than 2, flow=" + String(chinampaData.fishtankoutflowflowRate));
-       FastLED.show();
-       chinampaData.alertstatus=true;
-       chinampaData.alertcode=4;
-  }
+//  if(digitalRead(FISH_OUTPUT_SOLENOID_RELAY) && chinampaData.fishtankoutflowflowRate<2){
+//    if(flowMeterReading)
+//   // digitalWrite(PUMP_RELAY_PIN, LOW);
+//       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+//       leds[3] = CRGB(255, 0, 0);
+//       leds[5] = CRGB(255, 0, 0);
+//       leds[6] = CRGB(255, 0, 0);
+//       leds[7] = CRGB(255, 0, 0);   
+//       Serial.println("Closing solenoid because flow is less than 2, flow=" + String(chinampaData.fishtankoutflowflowRate));
+//       FastLED.show();
+//       chinampaData.alertstatus=true;
+//       chinampaData.alertcode=4;
+//  }
   microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
   //Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
