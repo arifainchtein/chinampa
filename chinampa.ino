@@ -610,8 +610,8 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
 
 
   if(digitalRead(FISH_OUTPUT_SOLENOID_RELAY) && chinampaData.fishtankoutflowflowRate<2){
-    digitalWrite(PUMP_RELAY_PIN, LOW);
-       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+    //digitalWrite(PUMP_RELAY_PIN, LOW);
+     //  digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
        leds[3] = CRGB(255, 0, 0);
        leds[5] = CRGB(255, 0, 0);
        leds[6] = CRGB(255, 0, 0);
