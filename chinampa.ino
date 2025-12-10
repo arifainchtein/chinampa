@@ -516,7 +516,10 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
         }else{
           if(chinampaData.sumpTroughMeasuredHeight>= (chinampaData.sumpTroughHeight-chinampaData.minimumSumpTroughLevel)){
             digitalWrite(PUMP_RELAY_PIN, LOW);
-            leds[6] = CRGB(0, 0, 0);
+            leds[6] = CRGB(255, 0, 255);
+            chinampaData.alertstatus=true;
+            chinampaData.alertcode=5;
+       
           }else{
             digitalWrite(PUMP_RELAY_PIN, HIGH);
             leds[6] = CRGB(0, 255, 0);
@@ -551,6 +554,9 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
           digitalWrite(PUMP_RELAY_PIN, LOW);
           Serial.println("line 513  sump too low pump off");
           leds[6] = CRGB(0, 0, 0);
+           leds[6] = CRGB(255, 0, 255);
+            chinampaData.alertstatus=true;
+            chinampaData.alertcode=5;
         }else{
           digitalWrite(PUMP_RELAY_PIN, HIGH);
           Serial.println("line 513  sump above min pump on");
@@ -578,6 +584,8 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
         FastLED.show();
         Serial.println("line 468");
         keepgoing=false;
+
+        
     }
    }
   
@@ -614,20 +622,20 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
  chinampaData.fishtankoutPulsePerMinute = 60*(currentPulseCount/(timeElapsed / 1000.0));
 
 
-//  if(digitalRead(FISH_OUTPUT_SOLENOID_RELAY) && chinampaData.fishtankoutflowflowRate<2){
-//    if(flowMeterReading)
-//   // digitalWrite(PUMP_RELAY_PIN, LOW);
-//       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
-//       leds[3] = CRGB(255, 0, 0);
-//       leds[5] = CRGB(255, 0, 0);
-//       leds[6] = CRGB(255, 0, 0);
-//       leds[7] = CRGB(255, 0, 0);   
-//       Serial.println("Closing solenoid because flow is less than 2, flow=" + String(chinampaData.fishtankoutflowflowRate));
-//       FastLED.show();
-//       chinampaData.alertstatus=true;
-//       chinampaData.alertcode=4;
-//  }
-  microTempSensor.requestTemperatures();  // Send the command to get temperatures
+  if(digitalRead(FISH_OUTPUT_SOLENOID_RELAY) && chinampaData.fishtankoutflowflowRate<2){
+    //digitalWrite(PUMP_RELAY_PIN, LOW);
+     //  digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+       leds[3] = CRGB(255, 0, 0);
+       leds[5] = CRGB(255, 0, 0);
+       leds[6] = CRGB(255, 0, 0);
+       leds[7] = CRGB(255, 0, 0);   
+       Serial.println("Going red because fish solenouid is open and the fish opuitflow flow is less less than 2, flow=" + String(chinampaData.fishtankoutflowflowRate));
+       FastLED.show();
+       chinampaData.alertstatus=true;
+       chinampaData.alertcode=4;
+  }
+
+microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
   //Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
   if(chinampaData.microtemperature>75){
