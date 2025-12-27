@@ -44,7 +44,7 @@ NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_
 #define LORA_DI0 17
 
 
-
+boolean sendMessageNow=true;
 uint8_t displayStatus = 0;
 uint8_t loraLastResult=-99;
 LoRaError cadResult;
@@ -1129,15 +1129,17 @@ void loop() {
     {
       display2.setSegments(high, 4, 0);
     }
+    
+  }else if (currentTimerRecord.second == 15 || currentTimerRecord.second == 45){
           
-    if (loraActive) {
+    if (loraActive && sendMessageNow) {
         leds[1] = CRGB(0, 0, 255);
         FastLED.show();
         sendMessage();
+        sendMessageNow=false;
         leds[1] = CRGB(0, 255, 0);
         FastLED.show();
       }
-      
   } else if (currentTimerRecord.second == 10 || currentTimerRecord.second == 40) {
    // leds[4] = CRGB(0, 255, 0);
     FastLED.show();
@@ -1156,7 +1158,9 @@ void loop() {
     display2.showNumberDecEx(ftfr, (0x80 >> 1), false);
     
   } else if (currentTimerRecord.second == 20  || currentTimerRecord.second == 50 ) {
-    
+
+   sendMessageNow=true;
+
     const uint8_t t2[] = {
       TSEG_B | TSEG_C | TSEG_D | TSEG_E| TSEG_F,  // U
       0x00,
