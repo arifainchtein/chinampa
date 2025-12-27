@@ -213,7 +213,16 @@ void processLora(int packetSize){
       Serial.println(strlen(tempData.devicename));
 
       if (strncmp(tempData.devicename, "FISHTANK", 8) == 0) {
+        chinampaData.previousFishTankMeasuredHeight=fishTankDSD.measuredHeight;
         memcpy(&fishTankDSD, &tempData, sizeof(DigitalStablesData));
+
+         float difference = abs(chinampaData.fishTankMeasuredHeight - chinampaData.previousFishTankMeasuredHeight);
+          float tenPercentThreshold = chinampaData.previousFishTankMeasuredHeight * 0.10;
+          if (difference > tenPercentThreshold) {
+            sensorStatus[1]=1;
+          }else{
+            sensorStatus[1]=0;
+          }
         validData=true;
         fishTankDSD.rssi = LoRa.packetRssi();
         fishTankDSD.snr = LoRa.packetSnr();
@@ -230,8 +239,16 @@ void processLora(int packetSize){
         FastLED.show();
       } 
       else if (strcmp(tempData.devicename, "SumpTrough") == 0) {
+        chinampaData.previousSumpTroughMeasuredHeight=sumpTroughDSD.measuredHeight;
         memcpy(&sumpTroughDSD, &tempData, sizeof(DigitalStablesData));
          // dataManager.printDigitalStablesData(tempData);
+        float difference = abs(chinampaData.sumpTroughMeasuredHeight - chinampaData.previousSumpTroughMeasuredHeight);
+        float tenPercentThreshold = chinampaData.previousSumpTroughMeasuredHeight * 0.10;
+        if (difference > tenPercentThreshold) {
+          sensorStatus[2]=1;
+        }else{
+          sensorStatus[2]=0;
+        }
         sumpTroughDSD.rssi = LoRa.packetRssi();
         sumpTroughDSD.snr = LoRa.packetSnr();
         validData=true;
@@ -641,9 +658,10 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
 microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
   //Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
-  if(chinampaData.microtemperature>75){
-     chinampaData.alertstatus=true;
-       chinampaData.alertcode=10;
+  if(chinampaData.microtemperature>chinampaData.microtemperatureMaximum){
+    sensorstatus[0]=1;
+  }else{
+    sensorstatus[0]=1;
   }
 
     //
@@ -821,6 +839,10 @@ void setup() {
   Serial.print("serial number:");
   Serial.println(serialNumber);
 
+
+  for (uint8_t i = 0; i < 12; i++) {
+    sensorstatus[i]=0;
+  }
 
   SPI.begin(SCK, MISO, MOSI);
   pinMode(LoRa_SS, OUTPUT);
@@ -1011,6 +1033,11 @@ void loop() {
 //    Serial.printf("lora recive loraPacketSize: %d \n", loraPacketSize);
 //    Serial.println("");
     processLora(loraPacketSize);
+    //
+    // check to see if the sensor malfunction
+    //
+   
+
     loraReceived = false;
 //    bool show = false;
 //    currentPalette = RainbowStripeColors_p;
