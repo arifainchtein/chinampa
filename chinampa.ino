@@ -77,8 +77,6 @@ int delayTime = 10;
 bool loraActive = false;
 bool opmode = false;
 String serialNumber;
-int secondsSinceLastFishTankData=0;
-int secondsSinceLastSumpTroughData=0;
 uint8_t secondsSinceLastDataSampling = 0;
 PCF8563TimeManager timeManager(Serial);
 GeneralFunctions generalFunctions;
@@ -221,7 +219,7 @@ void processLora(int packetSize){
         fishTankDSD.snr = LoRa.packetSnr();
         
         dataManager.storeDigitalStablesData(fishTankDSD);
-        secondsSinceLastFishTankData=0;
+        chinampaData.secondsSinceLastFishTankData=0;
         chinampaData.minimumFishTankLevel=fishTankDSD.troughlevelminimumcm;
         chinampaData.maximumFishTankLevel=fishTankDSD.troughlevelmaximumcm;
         chinampaData.fishTankMeasuredHeight=fishTankDSD.measuredHeight;
@@ -237,7 +235,7 @@ void processLora(int packetSize){
         sumpTroughDSD.rssi = LoRa.packetRssi();
         sumpTroughDSD.snr = LoRa.packetSnr();
         validData=true;
-        secondsSinceLastSumpTroughData=0;
+        chinampaData.secondsSinceLastSumpTroughData=0;
         chinampaData.minimumSumpTroughLevel=sumpTroughDSD.troughlevelminimumcm;
         chinampaData.maximumSumpTroughLevel=sumpTroughDSD.troughlevelmaximumcm;
         chinampaData.sumpTroughMeasuredHeight=sumpTroughDSD.measuredHeight;
@@ -454,8 +452,8 @@ void readSensorData(){
    chinampaData.alertstatus=false;
    chinampaData.alertcode=0;
 
-if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
-   secondsSinceLastFishTankData<=chinampaData.fishTankStaleDataSeconds
+if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
+   chinampaData.secondsSinceLastFishTankData<=chinampaData.fishTankStaleDataSeconds
    ){
      leds[5] = CRGB(0, 0, 0);
      chinampaData.alertstatus=false;
@@ -463,36 +461,38 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
        FastLED.show();
    }
    
-   if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
+   if(chinampaData.secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
        digitalWrite(PUMP_RELAY_PIN, LOW);
        digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+       chinampaData.fishtankoutflowsolenoidrelaystatus=false;
        leds[3] = CRGB(255, 0, 0);
        leds[5] = CRGB(255, 0, 0);
        leds[6] = CRGB(255, 0, 0);
        leds[7] = CRGB(255, 0, 0);   
-       Serial.println("Going red because fish data is stale,secondsSinceLastFishTankData=" + String(secondsSinceLastFishTankData));
+       Serial.println("Going red because fish data is stale,chinampaData.secondsSinceLastFishTankData=" + String(chinampaData.secondsSinceLastFishTankData));
        keepgoing=false; 
        FastLED.show();
        chinampaData.alertstatus=true;
        chinampaData.alertcode=1;
    }
 
-   if(secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+   if(chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
        digitalWrite(PUMP_RELAY_PIN, LOW);
        digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+       chinampaData.fishtankoutflowsolenoidrelaystatus=false;
        leds[4] = CRGB(255, 0, 0);
        leds[5] = CRGB(255, 0, 0);
        leds[6] = CRGB(255, 0, 0);
        leds[7] = CRGB(255, 0, 0);   
-       Serial.println("Going red because secondsSinceLastSumpTroughData data is stale,secondsSinceLastSumpTroughData=" + String(secondsSinceLastSumpTroughData));
+       Serial.println("Going red because chinampaData.secondsSinceLastSumpTroughData data is stale,chinampaData.secondsSinceLastSumpTroughData=" + String(chinampaData.secondsSinceLastSumpTroughData));
        keepgoing=false; 
        FastLED.show();
        chinampaData.alertstatus=true;
        chinampaData.alertcode=2;
    }
 
-   if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds &&
-   secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds
+   if(chinampaData.secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds &&
+   chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds
     ){
        chinampaData.alertstatus=true;
        chinampaData.alertcode=3;
@@ -506,11 +506,12 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
         //
         
         digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+        chinampaData.fishtankoutflowsolenoidrelaystatus=false;
         leds[7] = CRGB(0, 0, 0);    
         //
         // now check the pump
         //
-        if(secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+        if(chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
           digitalWrite(PUMP_RELAY_PIN, LOW);
           leds[6] = CRGB(255, 0, 0);
         }else{
@@ -540,12 +541,13 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
       // everything active
       //
       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+      chinampaData.fishtankoutflowsolenoidrelaystatus=true;
       leds[7] = CRGB(0, 255, 0);  
       Serial.println("line 502  fisdh tank is green");
       //
       // now check the pump
       //
-      if(secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+      if(chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
         digitalWrite(PUMP_RELAY_PIN, LOW);
          Serial.println("line 508  sump stale");
         leds[6] = CRGB(255, 0, 0);
@@ -575,6 +577,7 @@ if(secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleDataSeconds &&
       //
       Serial.println("line 529, fish tank too high");
       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+      chinampaData.fishtankoutflowsolenoidrelaystatus=true;
       leds[7] = CRGB(0, 255, 0);  
 
       // the fish tank is too high, turn the pump off
@@ -807,18 +810,16 @@ void setup() {
   devicename.toCharArray(chinampaData.devicename, devicename.length() + 1);
   
   microTempSensor.begin();
-  uint8_t address[8];
-  microTempSensor.getAddress(address, 0);
+  microTempSensor.setWaitForConversion(false); // Don't block during conversion 
+  microTempSensor.setResolution(9);
+  microTempSensor.getAddress(chinampaData.serialnumberarray, 0);
   for (uint8_t i = 0; i < 8; i++) {
     //if (address[i] < 16) Serial.print("0");
-    serialNumber += String(address[i], HEX);
+    serialNumber += String(chinampaData.serialnumberarray[i], HEX);
   }
 
   Serial.print("serial number:");
   Serial.println(serialNumber);
-
-
-  microTempSensor.begin();
 
 
   SPI.begin(SCK, MISO, MOSI);
@@ -865,6 +866,7 @@ Serial.println("about to start LoRa");
     leds[1] = CRGB(0, 0, 255);
     display2.setSegments(on, 2, 0);
     loraActive = true;
+     chinampaData.loraActive = loraActive;
   }
   FastLED.show();
  // delay(1000);
@@ -965,12 +967,12 @@ if (loraActive) {
    leds[5] = CRGB(255, 0, 0);
    leds[6] = CRGB(255, 0, 0);
    leds[7] = CRGB(255, 0, 0);   
-   Serial.println("Going red because fish data is stale,secondsSinceLastFishTankData=" + String(secondsSinceLastFishTankData));
+   Serial.println("Going red because fish data is stale,chinampaData.secondsSinceLastFishTankData=" + String(chinampaData.secondsSinceLastFishTankData));
    FastLED.show();
    chinampaData.alertstatus=true;
-   chinampaData.alertcode=0;
-   secondsSinceLastSumpTroughData=99;
-   secondsSinceLastFishTankData=99;
+   chinampaData.alertcode=1;
+   chinampaData.secondsSinceLastSumpTroughData=99;
+   chinampaData.secondsSinceLastFishTankData=99;
            
   Serial.println("Ok-Ready");
 }
@@ -987,9 +989,9 @@ void loop() {
     wifiManager.setCurrentTimerRecord(currentTimerRecord);
     chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
   //  Serial.println("secondsSinceLastFishTankData=" +  String(secondsSinceLastFishTankData));
-  //  Serial.println("secondsSinceLastSumpTroughData=" +  String(secondsSinceLastSumpTroughData));
-    secondsSinceLastFishTankData++;
-    secondsSinceLastSumpTroughData++;
+  //  Serial.println("chinampaData.secondsSinceLastSumpTroughData=" +  String(chinampaData.secondsSinceLastSumpTroughData));
+    chinampaData.secondsSinceLastFishTankData++;
+    chinampaData.secondsSinceLastSumpTroughData++;
     dsUploadTimer.tick();
 
     if (currentTimerRecord.second == 0) {
@@ -1112,7 +1114,7 @@ void loop() {
     display1.setSegments(fish, 4, 0);
     int fishtanklevel = (int)(chinampaData.fishTankMeasuredHeight * 100);
     //display2.showNumberDecEx(fishtanklevel, (0x80 >> 1), false);
-    if(secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
+    if(chinampaData.secondsSinceLastFishTankData>chinampaData.fishTankStaleDataSeconds){
       display2.setSegments(staL, 4, 0);
     }
     else if (chinampaData.fishTankMeasuredHeight >=(chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel) )
