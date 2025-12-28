@@ -566,11 +566,13 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
       //
       if(chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
         digitalWrite(PUMP_RELAY_PIN, LOW);
+        chinampaData.pumprelaystatus=false;
          Serial.println("line 508  sump stale");
         leds[6] = CRGB(255, 0, 0);
       }else{
          if(chinampaData.sumpTroughMeasuredHeight>= (chinampaData.sumpTroughHeight-chinampaData.minimumSumpTroughLevel)){
           digitalWrite(PUMP_RELAY_PIN, LOW);
+          chinampaData.pumprelaystatus=false;
           Serial.println("line 513  sump too low pump off");
           leds[6] = CRGB(0, 0, 0);
            leds[6] = CRGB(255, 0, 255);
@@ -578,6 +580,7 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
             chinampaData.alertcode=5;
         }else{
           digitalWrite(PUMP_RELAY_PIN, HIGH);
+          chinampaData.pumprelaystatus=true;
           Serial.println("line 513  sump above min pump on");
           leds[6] = CRGB(0, 255, 0);
         }
@@ -600,6 +603,7 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
       // the fish tank is too high, turn the pump off
       //
        digitalWrite(PUMP_RELAY_PIN, LOW);
+       chinampaData.pumprelaystatus=false;
           leds[6] = CRGB(255, 255, 0);
         FastLED.show();
         Serial.println("line 468");
