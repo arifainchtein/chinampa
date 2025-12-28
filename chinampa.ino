@@ -219,9 +219,9 @@ void processLora(int packetSize){
          float difference = abs(chinampaData.fishTankMeasuredHeight - chinampaData.previousFishTankMeasuredHeight);
           float tenPercentThreshold = chinampaData.previousFishTankMeasuredHeight * 0.10;
           if (difference > tenPercentThreshold) {
-            sensorStatus[1]=1;
+            chinampaData.sensorstatus[1]=true;
           }else{
-            sensorStatus[1]=0;
+            chinampaData.sensorstatus[1]=false;
           }
         validData=true;
         fishTankDSD.rssi = LoRa.packetRssi();
@@ -245,9 +245,9 @@ void processLora(int packetSize){
         float difference = abs(chinampaData.sumpTroughMeasuredHeight - chinampaData.previousSumpTroughMeasuredHeight);
         float tenPercentThreshold = chinampaData.previousSumpTroughMeasuredHeight * 0.10;
         if (difference > tenPercentThreshold) {
-          sensorStatus[2]=1;
+          chinampaData.sensorstatus[2]=true;
         }else{
-          sensorStatus[2]=0;
+          chinampaData.sensorstatus[2]=false;
         }
         sumpTroughDSD.rssi = LoRa.packetRssi();
         sumpTroughDSD.snr = LoRa.packetSnr();
@@ -659,9 +659,9 @@ microTempSensor.requestTemperatures();  // Send the command to get temperatures
   chinampaData.microtemperature = microTempSensor.getTempCByIndex(0);
   //Serial.println(" Micro T:" + String(chinampaData.microtemperature) );
   if(chinampaData.microtemperature>chinampaData.microtemperatureMaximum){
-    sensorstatus[0]=1;
+    chinampaData.sensorstatus[0]=true;
   }else{
-    sensorstatus[0]=1;
+    chinampaData.sensorstatus[0]=false;
   }
 
     //
@@ -841,7 +841,7 @@ void setup() {
 
 
   for (uint8_t i = 0; i < 12; i++) {
-    sensorstatus[i]=0;
+    chinampaData.sensorstatus[i]=0;
   }
 
   SPI.begin(SCK, MISO, MOSI);
@@ -1095,6 +1095,8 @@ void loop() {
   FastLED.show();
   if (currentTimerRecord.second == 0 || currentTimerRecord.second == 30) {
    // leds[5] = CRGB(0, 255, 0);
+   sendMessageNow=true;
+
     FastLED.show();
     const uint8_t fish[] = {
       TSEG_A | TSEG_E | TSEG_F | TSEG_G,  // F
@@ -1157,7 +1159,7 @@ void loop() {
       display2.setSegments(high, 4, 0);
     }
     
-  }else if (currentTimerRecord.second == 15 || currentTimerRecord.second == 45){
+  }else if (currentTimerRecord.second == 5  ||currentTimerRecord.second == 25 || currentTimerRecord.second == 45){
           
     if (loraActive && sendMessageNow) {
         leds[1] = CRGB(0, 0, 255);
@@ -1168,6 +1170,7 @@ void loop() {
         FastLED.show();
       }
   } else if (currentTimerRecord.second == 10 || currentTimerRecord.second == 40) {
+   sendMessageNow=true;
    // leds[4] = CRGB(0, 255, 0);
     FastLED.show();
     const uint8_t fflo[] = {
