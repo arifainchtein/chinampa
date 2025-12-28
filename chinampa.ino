@@ -43,8 +43,10 @@ NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_
 #define LORA_RESET 16
 #define LORA_DI0 17
 
+bool turningPumpOn=false;
+bool turningPumpOff=false;
 
-boolean sendMessageNow=true;
+bool sendMessageNow=true;
 uint8_t displayStatus = 0;
 uint8_t loraLastResult=-99;
 LoRaError cadResult;
@@ -197,6 +199,7 @@ void processLora(int packetSize){
     boolean validData=false;
      DigitalStablesData tempData;
     memset(&tempData, 0, sizeof(DigitalStablesData));
+    sendDSDMessage(tempData);
     LoRa.readBytes((uint8_t*)&tempData, sizeof(DigitalStablesData));
     tempData.devicename[sizeof(tempData.devicename) - 1] = '\0';
      Serial.println("received from " + String(tempData.devicename));
@@ -326,6 +329,15 @@ LoRaError performCAD() {
     return LORA_OK;
 }
 
+void  sendDSDMessage(DigitalStablesData digitalStablesData){
+  LoRa.beginPacket();  // start packet
+  LoRa.write((uint8_t *)&digitalStablesData, sizeof(DigitalStablesData));
+  LoRa.endPacket();  // finish packet and send it
+  msgCount++;        // increment message ID
+   LoRa_txMode();
+  
+}
+
 void sendMessage() {
   LoRa.beginPacket();  // start packet
   LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
@@ -359,10 +371,10 @@ void sendMessage() {
       result = cadResult;
       int backoff = random(MIN_BACKOFF * (1 << retries), MAX_BACKOFF * (1 << retries));
      
-     Serial.print("Channel busy, retry ");
-     Serial.print(retries + 1);
+      Serial.print("Channel busy, retry ");
+      Serial.print(retries + 1);
       Serial.print(" of ");
-  Serial.print(MAX_RETRIES);
+      Serial.print(MAX_RETRIES);
       Serial.print(". Waiting ");
       Serial.print(backoff);
       Serial.println("ms");
@@ -531,16 +543,23 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
         if(chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
           digitalWrite(PUMP_RELAY_PIN, LOW);
           leds[6] = CRGB(255, 0, 0);
+           if(chinampaData.pumprelaystatus)turningPumpOff=true;
+          chinampaData.pumprelaystatus=false;
         }else{
           if(chinampaData.sumpTroughMeasuredHeight>= (chinampaData.sumpTroughHeight-chinampaData.minimumSumpTroughLevel)){
             digitalWrite(PUMP_RELAY_PIN, LOW);
             leds[6] = CRGB(255, 0, 255);
             chinampaData.alertstatus=true;
             chinampaData.alertcode=5;
+            if(chinampaData.pumprelaystatus)turningPumpOff=true;
+            chinampaData.pumprelaystatus=false;
        
           }else{
+            if(!chinampaData.pumprelaystatus)turningPumpOn=true;
             digitalWrite(PUMP_RELAY_PIN, HIGH);
+            chinampaData.pumprelaystatus=true;
             leds[6] = CRGB(0, 255, 0);
+            
           }
         
         Serial.println("line 328 1");
@@ -548,6 +567,14 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
       }
       FastLED.show();
     }
+     if(turningPumpOn){
+        sendMessage();
+        turningPumpOn=false;
+      }
+      if(turningPumpOff){
+        sendMessage();
+        turningPumpOff=false;
+      }
    }
    
    if(keepgoing){
@@ -557,6 +584,7 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
       //
       // everything active
       //
+     
       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
       chinampaData.fishtankoutflowsolenoidrelaystatus=true;
       leds[7] = CRGB(0, 255, 0);  
@@ -565,12 +593,14 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
       // now check the pump
       //
       if(chinampaData.secondsSinceLastSumpTroughData>chinampaData.sumpTroughStaleDataSeconds){
+        if(chinampaData.pumprelaystatus)turningPumpOff=true;    
         digitalWrite(PUMP_RELAY_PIN, LOW);
         chinampaData.pumprelaystatus=false;
          Serial.println("line 508  sump stale");
         leds[6] = CRGB(255, 0, 0);
       }else{
          if(chinampaData.sumpTroughMeasuredHeight>= (chinampaData.sumpTroughHeight-chinampaData.minimumSumpTroughLevel)){
+          if(chinampaData.pumprelaystatus)turningPumpOff=true;
           digitalWrite(PUMP_RELAY_PIN, LOW);
           chinampaData.pumprelaystatus=false;
           Serial.println("line 513  sump too low pump off");
@@ -579,12 +609,23 @@ if(chinampaData.secondsSinceLastSumpTroughData<=chinampaData.sumpTroughStaleData
             chinampaData.alertstatus=true;
             chinampaData.alertcode=5;
         }else{
+          if(!chinampaData.pumprelaystatus)turningPumpOn=true;
           digitalWrite(PUMP_RELAY_PIN, HIGH);
           chinampaData.pumprelaystatus=true;
           Serial.println("line 513  sump above min pump on");
           leds[6] = CRGB(0, 255, 0);
         }
       }
+      if(turningPumpOn){
+        sendMessage();
+        turningPumpOn=false;
+      }
+
+      if(turningPumpOff){
+        sendMessage();
+        turningPumpOff=false;
+      }
+
       keepgoing=false;
       FastLED.show();
      }
