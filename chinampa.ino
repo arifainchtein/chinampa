@@ -1,11 +1,10 @@
 #include "Arduino.h"
 #include <LittleFS.h>
 #include <NewPing.h>
-#include <ChinampaWifiManager.h>
+//#include <Chinampa//wifiManager.h>
 #include <Timer.h>
 #include <PCF8563TimeManager.h>
 #include <Esp32SecretManager.h>
-#include <Arduino_JSON.h>
 #include <FastLED.h>
 #include <TM1637Display.h>
 #include <OneWire.h>
@@ -95,13 +94,14 @@ DataManager dataManager(Serial, LittleFS);
 
 DigitalStablesData fishTankDSD, sumpTroughDSD;
 uint8_t currentFunctionValue = 10;
-ChinampaWifiManager wifiManager(Serial, LittleFS, timeManager, secretManager, chinampaData, chinampaConfigData);
+
+//ChinampaWifiManager wifiManager(Serial, LittleFS, timeManager, secretManager, chinampaData, chinampaConfigData);
 
 float operatingStatus = 3;
 bool wifiActive = false;
 bool apActive = false;
 long requestTempTime = 0;
-JSONVar jsonData;
+
 TM1637Display display1(UI_CLK, UI1_DAT);
 TM1637Display display2(UI_CLK, UI2_DAT);
 CRGB leds[NUM_LEDS];
@@ -261,7 +261,8 @@ void processLora(int packetSize) {
       chinampaData.maximumSumpTroughLevel = sumpTroughDSD.troughlevelmaximumcm;
       chinampaData.sumpTroughMeasuredHeight = sumpTroughDSD.measuredHeight;
       chinampaData.sumpTroughHeight = sumpTroughDSD.maximumScepticHeight;
-
+      chinampaData.outdoortemperature = sumpTroughDSD.outdoortemperature;
+      chinampaData.outdoorhumidity = sumpTroughDSD.outdoorhumidity;
 
       Serial.println("Data received from SumpTrough sumpTroughMeasuredHeight=" + String(chinampaData.sumpTroughMeasuredHeight));
       leds[4] = CRGB(0, 255, 0);
@@ -398,61 +399,61 @@ void sendMessage() {
 // End of Lora Functions
 //
 
-int processDisplayValue1(String displayURL, struct DisplayData *displayData) {
-  int value = 0;
-  bool debug = false;
-  // Serial.print("getting data for ");
-  //  Serial.println(displayURL);
-
-  String displayValue = wifiManager.getTeleonomeData(displayURL, debug);
-  //   Serial.print("received ");
-  //  Serial.print(displayValue);
-  if (displayValue.indexOf("Error") > 0) {
-    value = 9999;
-  } else {
-    jsonData = JSON.parse(displayValue);
-    if (jsonData["Value Type"] == JSONVar("int")) {
-      auto val = (const char *)jsonData["Value"];
-      if (val == NULL) {
-        value = (int)jsonData["Value"];
-      } else {
-        String s((const char *)jsonData["Value"]);
-        value = s.toInt();
-      }
-      displayData->dp = -1;
-      Serial.print("int value= ");
-      Serial.println(value);
-    } else if (jsonData["Value Type"] == JSONVar("double")) {
-      auto val = (const char *)jsonData["Value"];
-      if (val == NULL) {
-        double valueF = (double)jsonData["Value"];
-        if (valueF == (int)valueF) {
-          value = (int)valueF;
-          displayData->dp = -1;
-        } else {
-          value = (int)(100 * valueF);
-          displayData->dp = 1;
-        }
-      } else {
-        String s((const char *)jsonData["Value"]);
-        float valueF = s.toFloat();
-        if (valueF == (int)valueF) {
-          value = (int)valueF;
-          displayData->dp = -1;
-        } else {
-          value = (int)(100 * valueF);
-          displayData->dp = 1;
-        }
-      }
-    } else {
-      value = 9997;
-      displayData->dp = -1;
-    }
-  }
-  displayData->value = value;
-
-  return value;
-}
+//int processDisplayValue1(String displayURL, struct DisplayData *displayData) {
+//  int value = 0;
+//  bool debug = false;
+//  // Serial.print("getting data for ");
+//  //  Serial.println(displayURL);
+//
+//  String displayValue = "";//wifiManager.getTeleonomeData(displayURL, debug);
+//  //   Serial.print("received ");
+//  //  Serial.print(displayValue);
+//  if (displayValue.indexOf("Error") > 0) {
+//    value = 9999;
+//  } else {
+//    jsonData = JSON.parse(displayValue);
+//    if (jsonData["Value Type"] == JSONVar("int")) {
+//      auto val = (const char *)jsonData["Value"];
+//      if (val == NULL) {
+//        value = (int)jsonData["Value"];
+//      } else {
+//        String s((const char *)jsonData["Value"]);
+//        value = s.toInt();
+//      }
+//      displayData->dp = -1;
+//      Serial.print("int value= ");
+//      Serial.println(value);
+//    } else if (jsonData["Value Type"] == JSONVar("double")) {
+//      auto val = (const char *)jsonData["Value"];
+//      if (val == NULL) {
+//        double valueF = (double)jsonData["Value"];
+//        if (valueF == (int)valueF) {
+//          value = (int)valueF;
+//          displayData->dp = -1;
+//        } else {
+//          value = (int)(100 * valueF);
+//          displayData->dp = 1;
+//        }
+//      } else {
+//        String s((const char *)jsonData["Value"]);
+//        float valueF = s.toFloat();
+//        if (valueF == (int)valueF) {
+//          value = (int)valueF;
+//          displayData->dp = -1;
+//        } else {
+//          value = (int)(100 * valueF);
+//          displayData->dp = 1;
+//        }
+//      }
+//    } else {
+//      value = 9997;
+//      displayData->dp = -1;
+//    }
+//  }
+//  displayData->value = value;
+//
+//  return value;
+//}
 
 
 int processDisplayValue(double valueF, struct DisplayData *displayData) {
@@ -632,7 +633,7 @@ void readSensorData() {
       Serial.println("line 529, fish tank too high");
       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
       chinampaData.fishtankoutflowsolenoidrelaystatus = true;
-      leds[7] = CRGB(0, 255, 0);
+      leds[7] = CRGB(0, 0, 255);
 
       // the fish tank is too high, turn the pump off
       //
@@ -718,7 +719,7 @@ void readSensorData() {
 
   chinampaData.rssi = 0;
   chinampaData.snr = 0;
-  //wifiManager.setSensorString(sensorData);
+  ////wifiManager.setSensorString(sensorData);
 
 
   cleareddisplay1 = true;
@@ -744,15 +745,15 @@ void restartWifi() {
     FastLED.show();
     // Serial.print(F("Before Starting Wifi cap="));
     // Serial.println(digitalStablesData.capacitorVoltage);
-    wifiManager.start();
+    //wifiManager.start();
     initiatedWifi = true;
   }
   Serial.println("Starting wifi");
 
-  wifiManager.restartWifi();
+  //wifiManager.restartWifi();
 
-  bool stationmode = wifiManager.getStationMode();
-  chinampaData.internetAvailable = wifiManager.getInternetAvailable();
+  bool stationmode = //wifiManager.getStationMode();
+  chinampaData.internetAvailable = //wifiManager.getInternetAvailable();
   //     digitalWrite(WATCHDOG_WDI, HIGH);
   //    delay(2);
   //    digitalWrite(WATCHDOG_WDI, LOW);
@@ -761,14 +762,14 @@ void restartWifi() {
   // Serial.print("digitalStablesData.internetAvailable=");
   // Serial.println(digitalStablesData.internetAvailable);
 
-  //  serialNumber = wifiManager.getMacAddress();
-  wifiManager.setSerialNumber(serialNumber);
-  wifiManager.setLora(loraActive);
-  String ssid = wifiManager.getSSID();
+  //  serialNumber = //wifiManager.getMacAddress();
+  //wifiManager.setSerialNumber(serialNumber);
+  //wifiManager.setLora(loraActive);
+  String ssid = "";//wifiManager.getSSID();
   String ipAddress = "";
   uint8_t ipi;
   if (stationmode) {
-    ipAddress = wifiManager.getIpAddress();
+    ipAddress = "";//wifiManager.getIpAddress();
     //   Serial.print("ipaddress=");
     //  Serial.println(ipAddress);
 
@@ -940,14 +941,14 @@ void setup() {
   if (!initiatedWifi) {
     // Serial.print(F("Before Starting Wifi cap="));
     // Serial.println(digitalStablesData.capacitorVoltage);
-    wifiManager.start();
+    //wifiManager.start();
     initiatedWifi = true;
   }
   Serial.println("Starting wifi");
 
 
-  bool stationmode = wifiManager.getStationMode();
-  chinampaData.internetAvailable = wifiManager.getInternetAvailable();
+  bool stationmode = "";///wifiManager.getStationMode();
+  chinampaData.internetAvailable =false; //wifiManager.getInternetAvailable();
 
   Serial.print("Starting wifi stationmode=");
   Serial.print(stationmode);
@@ -956,14 +957,14 @@ void setup() {
   Serial.println(chinampaData.internetAvailable);
 
 
-  //  serialNumber = wifiManager.getMacAddress();
-  wifiManager.setSerialNumber(serialNumber);
-  wifiManager.setLora(loraActive);
-  String ssid = wifiManager.getSSID();
+  //  serialNumber = //wifiManager.getMacAddress();
+  //wifiManager.setSerialNumber(serialNumber);
+  //wifiManager.setLora(loraActive);
+  String ssid = "";///wifiManager.getSSID();
   String ipAddress = "";
   uint8_t ipi;
   if (stationmode) {
-    ipAddress = wifiManager.getIpAddress();
+    ipAddress = "";//wifiManager.getIpAddress();
     Serial.print("line 430 ipaddress=");
     Serial.println(ipAddress);
 
@@ -978,7 +979,7 @@ void setup() {
 
 
 
-  internetAvailable = wifiManager.getInternetAvailable();
+  internetAvailable = false;//wifiManager.getInternetAvailable();
 
   pinMode(RTC_BATT_VOLT, INPUT);
   pinMode(OP_MODE, INPUT_PULLUP);
@@ -1032,7 +1033,7 @@ void loop() {
     portEXIT_CRITICAL(&mux);
     secondsSinceLastDataSampling++;
     currentTimerRecord = timeManager.now();
-    wifiManager.setCurrentTimerRecord(currentTimerRecord);
+    //wifiManager.setCurrentTimerRecord(currentTimerRecord);
     chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
     //  Serial.println("secondsSinceLastFishTankData=" +  String(secondsSinceLastFishTankData));
     //  Serial.println("chinampaData.secondsSinceLastSumpTroughData=" +  String(chinampaData.secondsSinceLastSumpTroughData));
@@ -1090,8 +1091,8 @@ void loop() {
     Serial.print(code);
     chinampaData.dsLastUpload = timeVal;
 
-    wifiManager.setCurrentToTpCode(code);
-    bool uploadok = wifiManager.uploadDataToDigitalStables();
+    //wifiManager.setCurrentToTpCode(code);
+    bool uploadok =false; //wifiManager.uploadDataToDigitalStables();
     if (uploadok) {
       leds[2] = CRGB(0, 0, 255);
     } else {
@@ -1324,7 +1325,7 @@ void loop() {
     } else if (command.startsWith("GetWifiStatus")) {
 
 
-      uint8_t status = wifiManager.getWifiStatus();
+      uint8_t status = 0;//wifiManager.getWifiStatus();
       Serial.print("WifiStatus=");
       Serial.println(status);
 
@@ -1337,7 +1338,7 @@ void loop() {
       String ssid = generalFunctions.getValue(command, '#', 1);
       String password = generalFunctions.getValue(command, '#', 2);
       String hostname = generalFunctions.getValue(command, '#', 3);
-      bool staok = wifiManager.configWifiSTA(ssid, password, hostname);
+      bool staok = false;//wifiManager.configWifiSTA(ssid, password, hostname);
       if (staok) {
         leds[0] = CRGB(0, 0, 255);
       } else {
@@ -1354,7 +1355,7 @@ void loop() {
       String soft_ap_password = generalFunctions.getValue(command, '#', 2);
       String hostname = generalFunctions.getValue(command, '#', 3);
 
-      bool stat = wifiManager.configWifiAP(soft_ap_ssid, soft_ap_password, hostname);
+      bool stat =false; //wifiManager.configWifiAP(soft_ap_ssid, soft_ap_password, hostname);
       if (stat) {
         leds[0] = CRGB(0, 255, 0);
       } else {
@@ -1458,17 +1459,17 @@ void loop() {
       delay(delayTime);
     } else if (command.startsWith("SSID")) {
       String currentSSID = generalFunctions.getValue(command, '#', 1);
-      wifiManager.setCurrentSSID(currentSSID.c_str());
+      //wifiManager.setCurrentSSID(currentSSID.c_str());
       Serial.println("Ok-currentSSID");
       Serial.flush();
       delay(delayTime);
     } else if (command.startsWith("GetIpAddress")) {
-      Serial.println(wifiManager.getIpAddress());
+     // Serial.println(wifiManager.getIpAddress());
       Serial.println("Ok-GetIpAddress");
       Serial.flush();
       delay(delayTime);
     } else if (command.startsWith("RestartWifi")) {
-      wifiManager.restartWifi();
+      //wifiManager.restartWifi();
       Serial.println("Ok-restartWifi");
       Serial.flush();
       delay(delayTime);
@@ -1485,7 +1486,7 @@ void loop() {
     } else if (command.startsWith("GetSensorData")) {
 
 
-      //  Serial.print(wiFiManager.getSensorData());
+      //  Serial.print(//wifiManager.getSensorData());
       Serial.flush();
       delay(delayTime);
     } else if (command.startsWith("AsyncData")) {
@@ -1537,8 +1538,8 @@ void setApMode() {
   //
   // set ap mode
   //
-  //  wifiManager.configWifiAP("PanchoTankFlowV1", "", "PanchoTankFlowV1");
-  String apAddress = wifiManager.getApAddress();
+  //  //wifiManager.configWifiAP("PanchoTankFlowV1", "", "PanchoTankFlowV1");
+  String apAddress ="";// //wifiManager.getApAddress();
   Serial.println("settting AP mode, address ");
   Serial.println(apAddress);
   const uint8_t ap[] = {
