@@ -866,7 +866,7 @@ void setup() {
 
 
   for (uint8_t i = 0; i < 12; i++) {
-    chinampaData.sensorstatus[i] = 0;
+    chinampaData.sensorstatus[i] = false;
   }
 
   SPI.begin(SCK, MISO, MOSI);
