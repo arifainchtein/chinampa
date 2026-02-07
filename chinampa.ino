@@ -63,7 +63,7 @@ float avgRssi = 0;
 #define MAX_RETRIES 5       // Maximum transmission retries
 #define MIN_BACKOFF 500     // Minimum backoff time in milliseconds
 #define MAX_BACKOFF 1500    // Maximum backoff time in milliseconds
-#define RSSI_THRESHOLD -60  // RSSI threshold in dBm
+#define RSSI_THRESHOLD -85  // RSSI threshold in dBm
 
 int badPacketCount = 0;
 byte msgCount = 0;         // count of outgoing messages
@@ -281,7 +281,44 @@ void processLora(int packetSize) {
     }
   }
 }
+
 LoRaError performCAD() {
+  if (!loraActive) {
+    return LORA_INIT_FAILED;
+  }
+
+  // 1. Prepare for a clean reading
+  LoRa.idle();   
+  LoRa.receive(); 
+  
+  // 2. Faster Sampling
+  // We reduce the delay and sample count to minimize "blind time"
+  const int SAMPLES = 4;
+  float rssiSum = 0;
+
+  for (int i = 0; i < SAMPLES; i++) {
+    rssiSum += LoRa.rssi();
+    delayMicroseconds(500); // Very fast check
+  }
+
+  avgRssi = rssiSum / SAMPLES;
+
+  // 3. Forgiving Threshold
+  // Using -85 allows the system to ignore background greenhouse noise
+  // but still detect another LoRa unit nearby.
+  if (avgRssi > -85) { 
+    
+    LoRa.idle();
+    return LORA_CHANNEL_BUSY;
+  }
+
+  // Clear for transmission
+
+  errorManager.clearLoRaError(LORA_CHANNEL_BUSY);
+  return LORA_OK;
+}
+
+LoRaError performCAD1() {
   if (!loraActive) {
     errorManager.setLoRaError(LORA_INIT_FAILED);
     return LORA_INIT_FAILED;
@@ -339,6 +376,87 @@ void sendDSDMessage(DigitalStablesData digitalStablesData) {
 }
 
 void sendMessage() {
+  uint8_t result = 99;
+  int retries = 0;
+  boolean keepGoing = true;
+  long startsendingtime = millis();
+
+  // 1. SWITCH TO TX MODE
+  LoRa_txMode();
+
+  while (keepGoing) {
+    // Check if the channel is clear
+    cadResult = performCAD();
+    
+    if (cadResult == LORA_OK) {
+      // 2. TRANSMIT ONCE (The original code sent twice, causing "deafness")
+      LoRa.beginPacket();
+      // Send the rebroadcast data
+      LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
+      
+      // Use false (blocking) to ensure transmission finishes before we switch back to RX
+      if (!LoRa.endPacket(false)) {
+        result = LORA_TX_FAILED;
+      } else {
+        result = LORA_OK;
+        msgCount++; // Only increment if actually sent
+      }
+      
+     
+      keepGoing = false;
+    } 
+    else if (cadResult == LORA_CHANNEL_BUSY) {
+      // 3. CHANNEL BUSY HANDLING
+      // If the Fish Tank or Sump is currently talking, we wait a moment
+      retries++;
+      if (retries < MAX_RETRIES) {
+        int backoff = random(MIN_BACKOFF, MAX_BACKOFF); // Keep backoff short for responsiveness
+       // if(debug) Serial.println("Channel busy, retrying in " + String(backoff) + "ms");
+        delay(backoff);
+      } else {
+        result = LORA_MAX_RETRIES_REACHED;
+        keepGoing = false;
+      }
+    } else {
+      // Hardware error
+      result = cadResult;
+      keepGoing = false;
+    }
+  }
+
+  // 4. RETURN TO RECEIVE MODE IMMEDIATELY
+  // This is vital so we don't miss the next incoming sensor packet
+  LoRa_rxMode();
+}
+
+void sendMessage11() {
+  // REMOVE the first LoRa.beginPacket/endPacket block entirely.
+  
+  uint8_t result = 99;
+  int retries = 0;
+  boolean keepGoing = true;
+  LoRa_txMode();
+  while (keepGoing) {
+    cadResult = performCAD();
+    if (cadResult == LORA_OK) {
+      LoRa.beginPacket();
+      LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
+      LoRa.endPacket(true); // true = async
+      result = LORA_OK;
+      keepGoing = false;
+    } else {
+      // If busy, don't use long delays. 
+      // A 600s gap in your data suggests this loop is getting stuck.
+      retries++;
+      if(retries >= MAX_RETRIES) keepGoing = false;
+      delay(random(50, 200)); // Keep backoff short for a 3m distance
+    }
+  }
+
+  // CRITICAL: Immediately return to listening
+  LoRa_rxMode(); 
+}
+void sendMessage1() {
   LoRa.beginPacket();  // start packet
   LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
   LoRa.endPacket();  // finish packet and send it
