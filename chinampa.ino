@@ -915,6 +915,11 @@ void setup() {
     loraActive = true;
     chinampaData.loraActive = loraActive;
   }
+
+    LoRa.setTxPower(17);
+    LoRa.setSpreadingFactor(9);
+    LoRa.enableCrc();
+    LoRa.setSignalBandwidth(125E3);
   FastLED.show();
   // delay(1000);
 
