@@ -621,6 +621,7 @@ void readSensorData() {
     chinampaData.alertcode = 1;
   }
 
+
   if (chinampaData.secondsSinceLastSumpTroughData > chinampaData.sumpTroughStaleDataSeconds) {
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
@@ -678,6 +679,10 @@ void readSensorData() {
         Serial.println("line 328 1");
         keepgoing = false;
       }
+
+      
+
+      
       FastLED.show();
     }
     if (turningPumpOn) {
@@ -764,6 +769,19 @@ void readSensorData() {
     }
   }
 
+
+if (chinampaData.secondsSinceLastFishTankData < chinampaData.fishTankStaleDataSeconds && 
+    chinampaData.secondsSinceLastSumpTroughData < chinampaData.sumpTroughStaleDataSeconds &&
+    chinampaData.sumpTroughMeasuredHeight >= (chinampaData.sumpTroughHeight - chinampaData.minimumSumpTroughLevel) &&
+    chinampaData.fishTankMeasuredHeight >= (chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel)
+  ) {
+      chinampaData.alertstatus = true;
+      chinampaData.alertcode = 6;
+      leds[5] = CRGB(255, 0, 255);
+      leds[6] = CRGB(255, 0, 255);
+      leds[7] = CRGB(255, 0, 255);
+
+}
 
 
   //
