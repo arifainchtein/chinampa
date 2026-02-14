@@ -42,8 +42,8 @@ NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_
 #define LORA_RESET 16
 #define LORA_DI0 17
 
-bool turningPumpOn = false;
-bool turningPumpOff = false;
+//bool turningPumpOn = false;
+//bool turningPumpOff = false;
 
 bool sendMessageNow = true;
 uint8_t displayStatus = 0;
@@ -598,7 +598,7 @@ void readSensorData() {
   boolean keepgoing = true;
   chinampaData.alertstatus = false;
   chinampaData.alertcode = 0;
-
+  boolean sendAMessage=false;
   if (chinampaData.secondsSinceLastSumpTroughData <= chinampaData.sumpTroughStaleDataSeconds && chinampaData.secondsSinceLastFishTankData <= chinampaData.fishTankStaleDataSeconds) {
     leds[5] = CRGB(0, 0, 0);
     chinampaData.alertstatus = false;
@@ -650,15 +650,23 @@ void readSensorData() {
       //
 
       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+      if (chinampaData.fishtankoutflowsolenoidrelaystatus){
+        sendAMessage=true;
+      }
       chinampaData.fishtankoutflowsolenoidrelaystatus = false;
       leds[7] = CRGB(0, 0, 0);
+       
       //
       // now check the pump
       //
       if (chinampaData.secondsSinceLastSumpTroughData > chinampaData.sumpTroughStaleDataSeconds) {
         digitalWrite(PUMP_RELAY_PIN, LOW);
         leds[6] = CRGB(255, 0, 0);
-        if (chinampaData.pumprelaystatus) turningPumpOff = true;
+        if (chinampaData.pumprelaystatus){
+          // because the pump is on but we
+          // are about to turn it off sendMessage
+          sendAMessage=true;
+        }
         chinampaData.pumprelaystatus = false;
       } else {
         if (chinampaData.sumpTroughMeasuredHeight >= (chinampaData.sumpTroughHeight - chinampaData.minimumSumpTroughLevel)) {
@@ -666,11 +674,19 @@ void readSensorData() {
           leds[6] = CRGB(255, 0, 255);
           chinampaData.alertstatus = true;
           chinampaData.alertcode = 5;
-          if (chinampaData.pumprelaystatus) turningPumpOff = true;
+          if (chinampaData.pumprelaystatus){
+            // because the pump is on but we
+            // are about to turn it off sendMessage
+            sendAMessage=true;
+          }
           chinampaData.pumprelaystatus = false;
 
         } else {
-          if (!chinampaData.pumprelaystatus) turningPumpOn = true;
+          if (!chinampaData.pumprelaystatus){
+            // because the pump is off but we
+            // are about to turn it on sendMessage
+            sendAMessage=true;
+          }
           digitalWrite(PUMP_RELAY_PIN, HIGH);
           chinampaData.pumprelaystatus = true;
           leds[6] = CRGB(0, 255, 0);
@@ -679,20 +695,9 @@ void readSensorData() {
         Serial.println("line 328 1");
         keepgoing = false;
       }
-
-      
-
-      
       FastLED.show();
     }
-    if (turningPumpOn) {
-      sendMessage();
-      turningPumpOn = false;
-    }
-    if (turningPumpOff) {
-      sendMessage();
-      turningPumpOff = false;
-    }
+   
   }
 
   if (keepgoing) {
@@ -710,14 +715,22 @@ void readSensorData() {
       // now check the pump
       //
       if (chinampaData.secondsSinceLastSumpTroughData > chinampaData.sumpTroughStaleDataSeconds) {
-        if (chinampaData.pumprelaystatus) turningPumpOff = true;
+        if (chinampaData.pumprelaystatus){
+            // because the pump is on but we
+            // are about to turn it off sendMessage
+            sendAMessage=true;
+        }
         digitalWrite(PUMP_RELAY_PIN, LOW);
         chinampaData.pumprelaystatus = false;
         Serial.println("line 508  sump stale");
         leds[6] = CRGB(255, 0, 0);
       } else {
         if (chinampaData.sumpTroughMeasuredHeight >= (chinampaData.sumpTroughHeight - chinampaData.minimumSumpTroughLevel)) {
-          if (chinampaData.pumprelaystatus) turningPumpOff = true;
+          if (chinampaData.pumprelaystatus){
+            // because the pump is on but we
+            // are about to turn it off sendMessage
+            sendAMessage=true;
+          }
           digitalWrite(PUMP_RELAY_PIN, LOW);
           chinampaData.pumprelaystatus = false;
           Serial.println("line 513  sump too low pump off");
@@ -726,23 +739,18 @@ void readSensorData() {
           chinampaData.alertstatus = true;
           chinampaData.alertcode = 5;
         } else {
-          if (!chinampaData.pumprelaystatus) turningPumpOn = true;
+          if (!chinampaData.pumprelaystatus){
+            // because the pump is off but we
+            // are about to turn it on sendMessage
+            sendAMessage=true;
+          }
           digitalWrite(PUMP_RELAY_PIN, HIGH);
           chinampaData.pumprelaystatus = true;
           Serial.println("line 513  sump above min pump on");
           leds[6] = CRGB(0, 255, 0);
         }
       }
-      if (turningPumpOn) {
-        sendMessage();
-        turningPumpOn = false;
-      }
-
-      if (turningPumpOff) {
-        sendMessage();
-        turningPumpOff = false;
-      }
-
+      
       keepgoing = false;
       FastLED.show();
     }
@@ -755,6 +763,11 @@ void readSensorData() {
       //
       Serial.println("line 529, fish tank too high");
       digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, HIGH);
+      if (!chinampaData.fishtankoutflowsolenoidrelaystatus){
+        // because the solenoid is off but we
+        // are about to turn it on sendMessage
+        sendAMessage=true;
+      }
       chinampaData.fishtankoutflowsolenoidrelaystatus = true;
       leds[7] = CRGB(0, 0, 255);
 
@@ -775,6 +788,12 @@ if (chinampaData.secondsSinceLastFishTankData < chinampaData.fishTankStaleDataSe
     chinampaData.sumpTroughMeasuredHeight >= (chinampaData.sumpTroughHeight - chinampaData.minimumSumpTroughLevel) &&
     chinampaData.fishTankMeasuredHeight >= (chinampaData.fishTankHeight - chinampaData.minimumFishTankLevel)
   ) {
+    if( chinampaData.alertcode != 6){
+      // because the system just detected
+      // that there is not enough water
+      // are about to turn it on sendMessage
+        sendAMessage=true;
+    }
       chinampaData.alertstatus = true;
       chinampaData.alertcode = 6;
       leds[5] = CRGB(255, 0, 255);
@@ -856,9 +875,11 @@ if (chinampaData.secondsSinceLastFishTankData < chinampaData.fishTankStaleDataSe
   chinampaData.rssi = 0;
   chinampaData.snr = 0;
   ////wifiManager.setSensorString(sensorData);
-
-
   cleareddisplay1 = true;
+
+ if (sendAMessage) {
+    sendMessage();
+ }
 }
 
 void restartWifi() {
