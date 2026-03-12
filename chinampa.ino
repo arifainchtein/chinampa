@@ -802,6 +802,47 @@ if (chinampaData.secondsSinceLastFishTankData < chinampaData.fishTankStaleDataSe
 
 }
 
+if(chinampaData.fishTankMeasuredHeight==0){
+   if( chinampaData.alertcode != 7){
+        sendAMessage=true;
+    }
+   chinampaData.alertstatus = true;
+    chinampaData.alertcode = 7;
+    leds[5] = CRGB(255, 0, 255);
+    leds[6] = CRGB(255, 0, 255);
+    leds[7] = CRGB(255, 0, 255);
+    digitalWrite(PUMP_RELAY_PIN, LOW);
+    digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+}
+
+if(chinampaData.sumpTroughMeasuredHeight==0){
+   if( chinampaData.alertcode != 8){
+        sendAMessage=true;
+    }
+   chinampaData.alertstatus = true;
+      chinampaData.alertcode = 8;
+      leds[5] = CRGB(255, 0, 255);
+      leds[6] = CRGB(255, 0, 255);
+      leds[7] = CRGB(255, 0, 255);
+    digitalWrite(PUMP_RELAY_PIN, LOW);
+    digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+
+}
+
+if(chinampaData.fishTankMeasuredHeight==0 && chinampaData.sumpTroughMeasuredHeight==0){
+    if( chinampaData.alertcode != 9){
+        sendAMessage=true;
+    }
+   chinampaData.alertstatus = true;
+   
+      chinampaData.alertcode = 9;
+      leds[5] = CRGB(255, 0, 255);
+      leds[6] = CRGB(255, 0, 255);
+      leds[7] = CRGB(255, 0, 255);
+    digitalWrite(PUMP_RELAY_PIN, LOW);
+    digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+
+}
 
   //
   // read the fish tank outflow flow
