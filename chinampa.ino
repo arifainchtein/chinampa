@@ -813,6 +813,8 @@ if(chinampaData.fishTankMeasuredHeight==0){
     leds[7] = CRGB(255, 0, 255);
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+    chinampaData.pumprelaystatus = false;
+    chinampaData.fishtankoutflowsolenoidrelaystatus = false;
 }
 
 if(chinampaData.sumpTroughMeasuredHeight==0){
@@ -826,6 +828,9 @@ if(chinampaData.sumpTroughMeasuredHeight==0){
       leds[7] = CRGB(255, 0, 255);
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+    chinampaData.pumprelaystatus = false;
+    chinampaData.fishtankoutflowsolenoidrelaystatus = false;
+
 
 }
 
@@ -841,6 +846,9 @@ if(chinampaData.fishTankMeasuredHeight==0 && chinampaData.sumpTroughMeasuredHeig
       leds[7] = CRGB(255, 0, 255);
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+    chinampaData.pumprelaystatus = false;
+    chinampaData.fishtankoutflowsolenoidrelaystatus = false;
+
 
 }
 
