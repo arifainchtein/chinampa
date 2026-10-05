@@ -18,6 +18,7 @@
 #include <ErrorDefinitions.h>
 #include <ErrorManager.h>
 #include <Wire.h>
+#include <VitalSignsTracker.h>
 
 #define UI_CLK 23
 #define UI1_DAT 26
@@ -82,6 +83,16 @@ uint8_t secondsSinceLastDataSampling = 0;
 PCF8563TimeManager timeManager(Serial);
 GeneralFunctions generalFunctions;
 Esp32SecretManager secretManager(timeManager);
+
+// Vital signs - wall powered and never sleeps, so only the reset, uptime (awakeSecondsTotal),
+// TX duration and TX-failure parts apply. Sent after the data pulse every
+// VITAL_SIGNS_INTERVAL_MS, and right after every boot. See VitalSignsTracker.h and
+// Projects/Annabelle/VitalSigns_Design.pdf.
+VitalSignsTracker vitalSigns;
+const uint32_t FIRMWARE_BUILD = VitalSignsTracker::buildStamp(__DATE__, __TIME__);
+#define VITAL_SIGNS_GAP_MS 1000                          // after the data packet, so Annabelle has read it
+#define VITAL_SIGNS_INTERVAL_MS (10UL * 60UL * 1000UL)
+unsigned long lastVitalSignsMs = 0;
 ChinampaCommandData chinampaCommandData;
 ChinampaConfigData chinampaConfigData;
 bool isHost = true;
@@ -264,7 +275,7 @@ void processLora(int packetSize) {
       chinampaData.sumpTroughHeight = sumpTroughDSD.maximumScepticHeight;
       chinampaData.outdoortemperature = sumpTroughDSD.outdoortemperature;
       chinampaData.outdoorhumidity = sumpTroughDSD.outdoorhumidity;
-      chinampaData.lux = sumpTroughDSD.lux;
+      chinampaData.lux = 0;  // lux removed from DigitalStablesData 2026-09-01; field kept so ChinampaData stays 248 bytes
       
       Serial.println("Data received from SumpTrough sumpTroughMeasuredHeight=" + String(chinampaData.sumpTroughMeasuredHeight));
       leds[4] = CRGB(0, 255, 0);
@@ -397,7 +408,10 @@ void sendMessage() {
       LoRa.write((uint8_t *)&chinampaData, sizeof(ChinampaData));
       
       // Use false (blocking) to ensure transmission finishes before we switch back to RX
-      if (!LoRa.endPacket(false)) {
+      vitalSigns.beginTx(nullptr);  // no current sensor: duration + failure count only
+      bool txOk = LoRa.endPacket(false);
+      vitalSigns.endTx(txOk);
+      if (!txOk) {
         result = LORA_TX_FAILED;
       } else {
         result = LORA_OK;
@@ -1012,7 +1026,45 @@ void restartWifi() {
 
 
 
+// XOR over every byte except the checksum itself - same scheme as the other LoRa records.
+uint8_t vitalSignsChecksum(const VitalSignsRecord &r) {
+  const uint8_t *p = (const uint8_t *)&r;
+  size_t offset = offsetof(VitalSignsRecord, checksum);
+  uint8_t checksum = 0;
+  for (size_t i = 0; i < sizeof(VitalSignsRecord); i++) {
+    if (i != offset) checksum ^= p[i];
+  }
+  return checksum;
+}
+
+// Sends the VitalSignsRecord VITAL_SIGNS_GAP_MS after the data packet (Annabelle has one LoRa FIFO).
+void sendVitalSigns() {
+  VitalSignsRecord record = vitalSigns.buildRecord(chinampaData.serialnumberarray, FIRMWARE_BUILD, 0);
+  record.totpcode = secretManager.generateCode();
+  record.checksum = vitalSignsChecksum(record);
+  delay(VITAL_SIGNS_GAP_MS);
+  LoRa_txMode();
+  bool sent = false;
+  for (int retries = 0; retries < MAX_RETRIES && !sent; retries++) {
+    cadResult = performCAD();
+    if (cadResult == LORA_OK) {
+      LoRa.beginPacket();
+      LoRa.write((uint8_t *)&record, sizeof(record));
+      sent = LoRa.endPacket(false);
+      break;
+    } else if (cadResult == LORA_CHANNEL_BUSY) {
+      delay(random(MIN_BACKOFF, MAX_BACKOFF));
+    } else {
+      break;
+    }
+  }
+  LoRa_rxMode();
+  if (sent) vitalSigns.markSent();
+  lastVitalSignsMs = millis();
+}
+
 void setup() {
+  vitalSigns.captureBoot();  // reset reason only, no I/O
   Serial.begin(115200);
   Wire.begin();
 
@@ -1059,6 +1111,7 @@ void setup() {
   timeManager.PCF8563osc1Hz();
   currentTimerRecord = timeManager.now();
   chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
+  vitalSigns.recordBoot(chinampaData.secondsTime);
   String deviceshortname = "CHIN";
   deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortname.length() + 1);
 
@@ -1400,6 +1453,9 @@ void loop() {
       FastLED.show();
       sendMessage();
       sendMessageNow = false;
+      if (vitalSigns.resetReportPending() || millis() - lastVitalSignsMs > VITAL_SIGNS_INTERVAL_MS) {
+        sendVitalSigns();
+      }
       leds[1] = CRGB(0, 255, 0);
       FastLED.show();
     }
