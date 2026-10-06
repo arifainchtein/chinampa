@@ -19,6 +19,7 @@
 #include <ErrorManager.h>
 #include <Wire.h>
 #include <VitalSignsTracker.h>
+#include <esp_core_dump.h>
 
 #define UI_CLK 23
 #define UI1_DAT 26
@@ -93,6 +94,37 @@ const uint32_t FIRMWARE_BUILD = VitalSignsTracker::buildStamp(__DATE__, __TIME__
 #define VITAL_SIGNS_GAP_MS 1000                          // after the data packet, so Annabelle has read it
 #define VITAL_SIGNS_INTERVAL_MS (10UL * 60UL * 1000UL)
 unsigned long lastVitalSignsMs = 0;
+
+// Event log (LittleFS, survives resets and power loss): boots with their reset reason, crashes
+// (from the core dump), WiFi drops with the ESP32's disconnect reason, reconnects, and Sump pull
+// failures. Read it with the serial command GetEventLog.
+//
+// Why: chinampa pulls the Sump data over the Sump's own WiFi (SSID SumpTrough, 192.168.4.1).
+// Nothing used to reconnect after a drop, and if the Sump was unreachable at boot setApMode()
+// switched to access-point mode for good - both leave LED 4 green/red (no WiFi data) until a
+// manual reset. checkWifi() now retries.
+#define EVENT_LOG_FILE "/eventlog.txt"
+#define EVENT_LOG_OLD_FILE "/eventlog.old"
+#define EVENT_LOG_MAX_BYTES 16384        // then the log moves to EVENT_LOG_OLD_FILE and starts again
+#define LAST_CRASH_FILE "/lastcrash.txt" // newest crash summary line + its fingerprint
+#define WIFI_RETRY_SECONDS 120           // no Sump WiFi this long -> start a new connection attempt
+#define SUMP_PULL_FAIL_LOG 3             // log when this many WiFi pulls in a row fail
+bool fsMounted = false;
+String lastCrash = "";
+volatile bool wifiDisconnectEvent = false;  // set by the WiFi event task, handled in checkWifi()
+volatile uint8_t wifiLastDisconnectReason = 0;
+bool wifiWasConnected = false;
+uint32_t wifiDownSeconds = 0;               // consecutive seconds without the Sump WiFi
+uint16_t wifiDropCount = 0;                 // since boot
+uint16_t wifiReconnectCount = 0;            // since boot
+bool wifiDroppedSinceVitals = false;
+uint16_t sumpPullFailStreak = 0;
+// LoRa receptions per source, logged every hour - shows whether the Sump's LoRa packets get
+// through now that the radio goes back to receive right after repeating a packet.
+uint16_t loraRxFish = 0, loraRxSump = 0, loraRxOther = 0;
+uint8_t loraRxHour = 255;  // 255 = first hour after boot, partial, not logged
+int wifiLastRssi = 0;                       // while connected; logged with a drop (RSSI reads 0 once down)
+volatile bool loraDio0Fired = false;        // set by onLoraDio0(), handled at the top of loop()
 ChinampaCommandData chinampaCommandData;
 ChinampaConfigData chinampaConfigData;
 bool isHost = true;
@@ -194,9 +226,12 @@ void LoRa_txMode() {
   LoRa.disableInvertIQ();  // normal mode
 }
 
-void IRAM_ATTR onReceive(int packetSize) {
-  loraReceived = true;
-  loraPacketSize = packetSize;
+// DIO0 interrupt: only set a flag. arduino-LoRa's own LoRa.onReceive() handler reads the radio
+// over SPI inside the interrupt, and SPI on ESP32 core 3.x takes a mutex, which must never be
+// waited on in an ISR (Annabelle's xQueueSemaphoreTake assert PANIC, 2026-10-05). The packet is
+// read in loop() with LoRa.parsePacket().
+void IRAM_ATTR onLoraDio0() {
+  loraDio0Fired = true;
 }
 
 void processLora(int packetSize) {
@@ -228,6 +263,10 @@ void processLora(int packetSize) {
 
     Serial.print("Device name length: ");
     Serial.println(strlen(tempData.devicename));
+
+    if (strncmp(tempData.devicename, "FISHTANK", 8) == 0) loraRxFish++;
+    else if (strcmp(tempData.devicename, "SumpTrough") == 0) loraRxSump++;
+    else loraRxOther++;
 
     if (strncmp(tempData.devicename, "FISHTANK", 8) == 0) {
       chinampaData.previousFishTankMeasuredHeight = fishTankDSD.measuredHeight;
@@ -612,6 +651,12 @@ void readSensorData() {
   if(gotData){
     leds[4] = CRGB(0, 255, 255);
     FastLED.show();
+    if (sumpPullFailStreak >= SUMP_PULL_FAIL_LOG) eventLog("sump pull ok again after " + String(sumpPullFailStreak) + " failures");
+    sumpPullFailStreak = 0;
+  } else if (WiFi.status() == WL_CONNECTED) {
+    // WiFi is up but the Sump did not answer (HTTP error or bad JSON) - a Sump-side problem
+    sumpPullFailStreak++;
+    if (sumpPullFailStreak == SUMP_PULL_FAIL_LOG) eventLog("sump pull failing with WiFi connected (" + String(SUMP_PULL_FAIL_LOG) + " in a row)");
   }
    Serial.println("gotData=" + String(gotData));
   // Serial.println("minimumFishTankHeight=" + String(chinampaData.minimumFishTankHeight));
@@ -1039,7 +1084,8 @@ uint8_t vitalSignsChecksum(const VitalSignsRecord &r) {
 
 // Sends the VitalSignsRecord VITAL_SIGNS_GAP_MS after the data packet (Annabelle has one LoRa FIFO).
 void sendVitalSigns() {
-  VitalSignsRecord record = vitalSigns.buildRecord(chinampaData.serialnumberarray, FIRMWARE_BUILD, 0);
+  VitalSignsRecord record = vitalSigns.buildRecord(chinampaData.serialnumberarray, FIRMWARE_BUILD, wifiStatusMask());
+  wifiDroppedSinceVitals = false;
   record.totpcode = secretManager.generateCode();
   record.checksum = vitalSignsChecksum(record);
   delay(VITAL_SIGNS_GAP_MS);
@@ -1061,6 +1107,208 @@ void sendVitalSigns() {
   LoRa_rxMode();
   if (sent) vitalSigns.markSent();
   lastVitalSignsMs = millis();
+}
+
+void eventLog(const String &msg) {
+  char ts[24];
+  snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d ", currentTimerRecord.year, currentTimerRecord.month,
+           currentTimerRecord.date, currentTimerRecord.hour, currentTimerRecord.minute, currentTimerRecord.second);
+  Serial.print("EventLog ");
+  Serial.print(ts);
+  Serial.println(msg);
+  if (!fsMounted) return;
+  File f = LittleFS.open(EVENT_LOG_FILE, "a");
+  if (!f) return;
+  if (f.size() > EVENT_LOG_MAX_BYTES) {
+    f.close();
+    LittleFS.remove(EVENT_LOG_OLD_FILE);
+    LittleFS.rename(EVENT_LOG_FILE, EVENT_LOG_OLD_FILE);
+    f = LittleFS.open(EVENT_LOG_FILE, "a");
+    if (!f) return;
+  }
+  f.print(ts);
+  f.println(msg);
+  f.close();
+}
+
+void printEventLog() {
+  Serial.print("LastCrash=");
+  Serial.println(lastCrash.length() ? lastCrash : "none");
+  Serial.println("WifiDrops=" + String(wifiDropCount) + " WifiReconnects=" + String(wifiReconnectCount) +
+                 " WifiDownSeconds=" + String(wifiDownSeconds) + " WifiMask=" + String(wifiStatusMask()));
+  const char *files[] = { EVENT_LOG_OLD_FILE, EVENT_LOG_FILE };
+  for (const char *name : files) {
+    File in = fsMounted ? LittleFS.open(name, "r") : File();
+    if (!in) continue;
+    while (in.available()) Serial.write(in.read());
+    in.close();
+  }
+}
+
+const char *resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "POWERON";
+    case ESP_RST_EXT: return "EXT";
+    case ESP_RST_SW: return "SW";
+    case ESP_RST_PANIC: return "PANIC";
+    case ESP_RST_INT_WDT: return "INT_WDT";
+    case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT: return "WDT";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    default: return "OTHER";
+  }
+}
+
+const char *wifiReasonName(uint8_t reason) {
+  switch (reason) {
+    case 2: return "AUTH_EXPIRE";
+    case 4: return "ASSOC_EXPIRE";
+    case 8: return "ASSOC_LEAVE";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT";
+    case 200: return "BEACON_TIMEOUT";
+    case 201: return "NO_AP_FOUND";
+    case 202: return "AUTH_FAIL";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT";
+    case 205: return "CONNECTION_FAIL";
+    default: return "";
+  }
+}
+
+// Runs in the WiFi event task, not loop(): only record, checkWifi() does the logging.
+void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    wifiLastDisconnectReason = info.wifi_sta_disconnected.reason;
+    wifiDisconnectEvent = true;
+  }
+}
+
+// Reported in the VitalSigns i2cDeviceMask field (device-specific bits):
+// bit 0 = connected to the Sump WiFi now, bit 1 = in access-point mode (not even trying the Sump),
+// bit 2 = the WiFi dropped at least once since the previous VitalSigns record,
+// bit 3 = WiFi up but the Sump is not answering (SUMP_PULL_FAIL_LOG pulls in a row failed).
+uint8_t wifiStatusMask() {
+  uint8_t mask = 0;
+  if (WiFi.status() == WL_CONNECTED) mask |= 0x01;
+  if (!(WiFi.getMode() & WIFI_MODE_STA)) mask |= 0x02;
+  if (wifiDroppedSinceVitals) mask |= 0x04;
+  if (sumpPullFailStreak >= SUMP_PULL_FAIL_LOG) mask |= 0x08;
+  return mask;
+}
+
+// Starts a connection to the Sump network without waiting (connectSTA() blocks for up to 21 s,
+// too long to stop the pump/solenoid logic every couple of minutes). Also leaves the AP fallback.
+void startWifiReconnect() {
+  WiFi.disconnect(false);
+  if (!(WiFi.getMode() & WIFI_MODE_STA)) WiFi.mode(WIFI_STA);
+  WiFi.begin(secretManager.getSSID().c_str(), secretManager.getWifiPassword().c_str());
+}
+
+// Once a second from loop().
+void checkWifi() {
+  bool connected = WiFi.status() == WL_CONNECTED;
+  if (wifiDisconnectEvent) {
+    wifiDisconnectEvent = false;
+    if (wifiWasConnected) {  // retries while already down also raise this event - log only the drop
+      uint8_t reason = wifiLastDisconnectReason;
+      eventLog("wifi dropped reason=" + String(reason) + " " + wifiReasonName(reason) + " lastRssi=" + String(wifiLastRssi));
+    }
+  }
+  if (connected) {
+    if (!wifiWasConnected) {
+      if (wifiDownSeconds > 0) {
+        wifiReconnectCount++;
+        eventLog("wifi connected ip=" + WiFi.localIP().toString() + " after " + String(wifiDownSeconds) + " s down");
+      } else {
+        eventLog("wifi connected ip=" + WiFi.localIP().toString());
+      }
+    }
+    wifiWasConnected = true;
+    wifiDownSeconds = 0;
+    wifiLastRssi = WiFi.RSSI();
+    return;
+  }
+  if (wifiWasConnected) {
+    wifiWasConnected = false;
+    wifiDropCount++;
+    wifiDroppedSinceVitals = true;
+  }
+  wifiDownSeconds++;
+  if (wifiDownSeconds % WIFI_RETRY_SECONDS == 0) {
+    bool apMode = !(WiFi.getMode() & WIFI_MODE_STA);
+    eventLog(String("wifi down ") + wifiDownSeconds + " s" + (apMode ? " (AP mode)" : "") + ", reconnecting");
+    startWifiReconnect();
+  }
+}
+
+// Same capture as Annabelle: summary of the core dump of the last panic, one line, kept in
+// LAST_CRASH_FILE and the event log. Decode with Projects/Annabelle/claude/decode_crash.sh (needs
+// the .elf of the build that crashed - save it after every flash).
+void recordCoreDump() {
+  String knownFingerprint = "";
+  File f = LittleFS.open(LAST_CRASH_FILE, "r");
+  if (f) {
+    lastCrash = f.readStringUntil('\n');
+    knownFingerprint = f.readStringUntil('\n');
+    f.close();
+    lastCrash.trim();
+    knownFingerprint.trim();
+  }
+  if (esp_core_dump_image_check() != ESP_OK) return;  // no (valid) dump in flash
+
+  esp_core_dump_summary_t *summary = (esp_core_dump_summary_t *)malloc(sizeof(esp_core_dump_summary_t));
+  if (summary == nullptr) return;
+  if (esp_core_dump_get_summary(summary) != ESP_OK) {
+    free(summary);
+    return;
+  }
+  size_t dumpAddr = 0, dumpSize = 0;
+  esp_core_dump_image_get(&dumpAddr, &dumpSize);
+  uint32_t fp = (uint32_t)dumpSize ^ summary->exc_pc ^ summary->exc_tcb;
+  for (uint32_t i = 0; i < summary->exc_bt_info.depth && i < 16; i++) fp = fp * 31 + summary->exc_bt_info.bt[i];
+  char fingerprint[12];
+  snprintf(fingerprint, sizeof(fingerprint), "%08lx", (unsigned long)fp);
+  if (knownFingerprint == fingerprint) {  // already recorded
+    free(summary);
+    return;
+  }
+
+  char reason[200] = "";
+  if (esp_core_dump_get_panic_reason(reason, sizeof(reason)) != ESP_OK) strcpy(reason, "?");
+  char buf[64];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d;", currentTimerRecord.year, currentTimerRecord.month,
+           currentTimerRecord.date, currentTimerRecord.hour, currentTimerRecord.minute, currentTimerRecord.second);
+  String line = String(buf) + reason + ";" + String(summary->exc_task) + ";";
+  snprintf(buf, sizeof(buf), "0x%08lx;", (unsigned long)summary->exc_pc);
+  line += buf;
+  for (uint32_t i = 0; i < summary->exc_bt_info.depth && i < 16; i++) {
+    snprintf(buf, sizeof(buf), "%s0x%08lx", i > 0 ? " " : "", (unsigned long)summary->exc_bt_info.bt[i]);
+    line += buf;
+  }
+  if (summary->exc_bt_info.corrupted) line += " (corrupted)";
+  line += ";";
+  for (int i = 0; i < 8 && summary->app_elf_sha256[i]; i++) line += (char)summary->app_elf_sha256[i];
+  const esp_core_dump_summary_extra_info_t &ex = summary->ex_info;
+  snprintf(buf, sizeof(buf), ";cause=%lu vaddr=0x%08lx a0=0x%08lx", (unsigned long)ex.exc_cause,
+           (unsigned long)ex.exc_vaddr, (unsigned long)((ex.exc_a[0] & 0x3FFFFFFFUL) | 0x40000000UL));
+  line += buf;
+  for (int i = 0; i < EPCx_REGISTER_COUNT; i++) {
+    if (!(ex.epcx_reg_bits & (1 << i))) continue;
+    snprintf(buf, sizeof(buf), " epc%d=0x%08lx", i + 1, (unsigned long)ex.epcx[i]);
+    line += buf;
+  }
+  free(summary);
+  line.replace("\n", " ");
+  line.replace("\r", " ");
+  lastCrash = line;
+
+  File out = LittleFS.open(LAST_CRASH_FILE, "w");
+  if (out) {
+    out.println(lastCrash);
+    out.println(fingerprint);
+    out.close();
+  }
+  eventLog("crash " + lastCrash);
 }
 
 void setup() {
@@ -1112,6 +1360,10 @@ void setup() {
   currentTimerRecord = timeManager.now();
   chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
   vitalSigns.recordBoot(chinampaData.secondsTime);
+  fsMounted = LittleFS.begin(false);  // no format: the web UI files live there
+  eventLog(String("boot reason=") + resetReasonName(esp_reset_reason()) + (fsMounted ? "" : " (LittleFS not mounted, log not saved)"));
+  if (fsMounted) recordCoreDump();
+  WiFi.onEvent(onWifiEvent);
   String deviceshortname = "CHIN";
   deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortname.length() + 1);
 
@@ -1257,7 +1509,7 @@ void setup() {
   if (loraActive) {
     // LoRa_rxMode();
     // LoRa.setSyncWord(0xF3);
-    LoRa.onReceive(onReceive);
+    attachInterrupt(digitalPinToInterrupt(LORA_DI0), onLoraDio0, RISING);
     // put the radio into receive mode
     LoRa.receive();
   }
@@ -1297,6 +1549,16 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
+  if (loraDio0Fired) {
+    loraDio0Fired = false;
+    int packetSize = LoRa.parsePacket();
+    if (packetSize > 0) {
+      loraPacketSize = packetSize;
+      loraReceived = true;
+    } else {
+      LoRa_rxMode();  // DIO0 without a good packet (CRC error, TxDone): back to continuous receive
+    }
+  }
   if (clockTicked) {
     portENTER_CRITICAL(&mux);
     clockTicked = false;
@@ -1310,6 +1572,15 @@ void loop() {
     chinampaData.secondsSinceLastFishTankData++;
     chinampaData.secondsSinceLastSumpTroughData++;
     dsUploadTimer.tick();
+    checkWifi();
+    if (currentTimerRecord.hour != loraRxHour) {  // hour changed (robust to a missed :00 tick)
+      if (loraRxHour != 255) {
+        eventLog("lora rx last hour: fish=" + String(loraRxFish) + " sump=" + String(loraRxSump) + " other=" + String(loraRxOther) +
+                 " | wifi drops since boot=" + String(wifiDropCount));
+      }
+      loraRxHour = currentTimerRecord.hour;
+      loraRxFish = loraRxSump = loraRxOther = 0;
+    }
 
     if (currentTimerRecord.second == 0) {
       //Serial.println(F("new minute"));
@@ -1328,6 +1599,7 @@ void loop() {
     //    Serial.printf("lora recive loraPacketSize: %d \n", loraPacketSize);
     //    Serial.println("");
     processLora(loraPacketSize);
+    LoRa_rxMode();  // parsePacket() leaves the radio idle after a packet
     //
     // check to see if the sensor malfunction
     //
@@ -1523,7 +1795,16 @@ void loop() {
     String command = Serial.readString();
     Serial.print(F("command="));
     Serial.println(command);
-    if (command.startsWith("Ping")) {
+    if (command.startsWith("GetEventLog")) {
+      printEventLog();
+      Serial.println("Ok-GetEventLog");
+    } else if (command.startsWith("ClearEventLog")) {
+      if (fsMounted) {
+        LittleFS.remove(EVENT_LOG_FILE);
+        LittleFS.remove(EVENT_LOG_OLD_FILE);
+      }
+      Serial.println("Ok-ClearEventLog");
+    } else if (command.startsWith("Ping")) {
       Serial.println(F("Ok-Ping"));
 
     } else if (command.startsWith("printLastFishTankData")) {
