@@ -19,7 +19,10 @@
 #include <ErrorManager.h>
 #include <Wire.h>
 #include <VitalSignsTracker.h>
-#include <esp_core_dump.h>
+#include <esp_arduino_version.h>
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+#include <esp_core_dump.h>  // crash capture needs the IDF 5 core-dump API (core 3.x); chinampa builds on core 2.0.17 too
+#endif
 
 #define UI_CLK 23
 #define UI1_DAT 26
@@ -1245,6 +1248,7 @@ void checkWifi() {
 // LAST_CRASH_FILE and the event log. Decode with Projects/Annabelle/claude/decode_crash.sh (needs
 // the .elf of the build that crashed - save it after every flash).
 void recordCoreDump() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
   String knownFingerprint = "";
   File f = LittleFS.open(LAST_CRASH_FILE, "r");
   if (f) {
@@ -1309,6 +1313,7 @@ void recordCoreDump() {
     out.close();
   }
   eventLog("crash " + lastCrash);
+#endif
 }
 
 void setup() {
@@ -1351,7 +1356,7 @@ void setup() {
   pinMode(PUMP_RELAY_PIN, OUTPUT);  // set up interrupt%20Pin
   pinMode(FISH_OUTPUT_SOLENOID_RELAY, OUTPUT);
 
-  pinMode(RTC_CLK_OUT, INPUT);  // set up interrupt%20Pin
+  pinMode(RTC_CLK_OUT, INPUT_PULLUP);  // set up interrupt%20Pin
   digitalWrite(RTC_CLK_OUT, HIGH);     // turn on pullup resistors
   // attach interrupt%20To set_tick_tock callback on rising edge of INT0
   attachInterrupt(digitalPinToInterrupt(RTC_CLK_OUT), clockTick, RISING);
@@ -1567,7 +1572,6 @@ void loop() {
     currentTimerRecord = timeManager.now();
     wifiManager.setCurrentTimerRecord(currentTimerRecord);
     chinampaData.secondsTime = timeManager.getCurrentTimeInSeconds(currentTimerRecord);
-      Serial.println("secondsSinceLastDataSampling=" +  String(secondsSinceLastDataSampling));
     //  Serial.println("chinampaData.secondsSinceLastSumpTroughData=" +  String(chinampaData.secondsSinceLastSumpTroughData));
     chinampaData.secondsSinceLastFishTankData++;
     chinampaData.secondsSinceLastSumpTroughData++;
