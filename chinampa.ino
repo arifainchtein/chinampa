@@ -1,4 +1,5 @@
 #include "Arduino.h"
+#include <DeviceSerial.h>  // the serial number is the efuse MAC (2026-10-30)
 #include <LittleFS.h>
 #include <NewPing.h>
 #include <ChinampaWifiManager.h>
@@ -19,6 +20,11 @@
 #include <ErrorManager.h>
 #include <Wire.h>
 #include <VitalSignsTracker.h>
+#include <SolarPowerData.h>       // WeatherForecastUpdate / WeatherForecast8Update - Annabelle's packets, measured not decoded
+#include <DeviceCommandRecord.h>  // Paula's / Annabelle's signal-survey ping
+#include <LinkAckRecord.h>        // the answer to that ping
+#include <LinkHealthRecord.h>     // link diagnosis, see the "LoRa Link-Health Diagnosis" doc
+#include <LinkHealthTracker.h>
 #include <esp_arduino_version.h>
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
 #include <esp_core_dump.h>  // crash capture needs the IDF 5 core-dump API (core 3.x); chinampa builds on core 2.0.17 too
@@ -50,7 +56,6 @@ NewPing fish_tank_height_sensor(TANK_LEVEL_TRIGGER, TANK_LEVEL_ECHO, TANK_LEVEL_
 //bool turningPumpOn = false;
 //bool turningPumpOff = false;
 
-bool sendMessageNow = true;
 uint8_t displayStatus = 0;
 uint8_t loraLastResult = -99;
 LoRaError cadResult;
@@ -126,6 +131,28 @@ uint16_t sumpPullFailStreak = 0;
 // through now that the radio goes back to receive right after repeating a packet.
 uint16_t loraRxFish = 0, loraRxSump = 0, loraRxOther = 0;
 uint8_t loraRxHour = 255;  // 255 = first hour after boot, partial, not logged
+
+// ---- LoRa link health (2026-11-10) ----
+// Annabelle receives the Sump (a metre away) reliably but Chinampa rarely. Instead of swapping
+// antennas, Chinampa reports what it knows about its own link (LinkHealthRecord.h, the "LoRa
+// Link-Health Diagnosis" doc): what became of every scheduled send, the idle-channel noise, how it
+// hears Annabelle and its neighbours. It also answers the signal-survey ping (LinkAckRecord), so
+// Paula's Signal Map can compare it with the Sump from the same spot.
+#define LORA_TX_POWER_DBM 17
+#define LORA_SPREADING_FACTOR 9
+#define LORA_SEND_INTERVAL_MS 20000UL       // data packet every 20 s (was: at clock seconds 5/25/45, skipped if the loop was late)
+#define LINK_HEALTH_GAP_MS 1000             // after the VitalSigns packet - Annabelle has one LoRa FIFO
+#define DEVICE_COMMAND_MAX_CLOCK_DIFF_SEC 900  // as Daffodil: a ping more than 15 min off our clock is refused
+LinkHealthState linkHealthState;            // always on, so plain RAM (a sleeping device would use RTC_DATA_ATTR)
+LinkHealthTracker linkHealth(linkHealthState);
+unsigned long lastLoraSendMs = 0;           // 0 = nothing sent since boot
+unsigned long loraRxAtMs = 0;               // when the packet being processed arrived
+bool linkHealthPending = false;
+unsigned long linkHealthDueMs = 0;
+uint32_t lastPingSenderTime = 0;
+bool linkAckPending = false;
+unsigned long linkAckDueMs = 0;
+LinkAckRecord pendingLinkAck;
 int wifiLastRssi = 0;                       // while connected; logged with a drop (RSSI reads 0 once down)
 volatile bool loraDio0Fired = false;        // set by onLoraDio0(), handled at the top of loop()
 ChinampaCommandData chinampaCommandData;
@@ -270,6 +297,7 @@ void processLora(int packetSize) {
     if (strncmp(tempData.devicename, "FISHTANK", 8) == 0) loraRxFish++;
     else if (strcmp(tempData.devicename, "SumpTrough") == 0) loraRxSump++;
     else loraRxOther++;
+    noteNeighbour(tempData.serialnumberarray, LoRa.packetRssi(), LoRa.packetSnr());
 
     if (strncmp(tempData.devicename, "FISHTANK", 8) == 0) {
       chinampaData.previousFishTankMeasuredHeight = fishTankDSD.measuredHeight;
@@ -334,6 +362,14 @@ void processLora(int packetSize) {
       FastLED.show();
     } else {
     }
+  } else if (packetSize == sizeof(WeatherForecastUpdate) || packetSize == sizeof(WeatherForecast8Update)) {
+    // Annabelle's forecast: Chinampa doesn't use it, but how strongly it arrives is the downlink
+    // half of the Annabelle <-> Chinampa link (LinkHealthRecord.gateway*, LinkAckRecord.gateway*).
+    noteGatewayPacket(LoRa.packetRssi(), LoRa.packetSnr());
+  } else if (packetSize == sizeof(DeviceCommandRecord)) {
+    DeviceCommandRecord c;
+    LoRa.readBytes((uint8_t *)&c, sizeof(c));
+    if (isBroadcastPing(c.serialnumberarray, c.command)) handlePing(c, LoRa.packetRssi(), LoRa.packetSnr());
   }
 }
 
@@ -426,6 +462,7 @@ void sendDSDMessage(DigitalStablesData digitalStablesData) {
   LoRa.beginPacket();  // start packet
   LoRa.write((uint8_t *)&digitalStablesData, sizeof(DigitalStablesData));
   LoRa.endPacket();  // finish packet and send it
+  loraDio0Fired = false;  // that was TX done, not a packet (LinkHealthTracker::noteRxCrcError)
   msgCount++;        // increment message ID
   LoRa_txMode();
 }
@@ -435,6 +472,7 @@ void sendMessage() {
   int retries = 0;
   boolean keepGoing = true;
   long startsendingtime = millis();
+  linkHealth.noteSendScheduled();
 
   // 1. SWITCH TO TX MODE
   LoRa_txMode();
@@ -452,6 +490,7 @@ void sendMessage() {
       // Use false (blocking) to ensure transmission finishes before we switch back to RX
       vitalSigns.beginTx(nullptr);  // no current sensor: duration + failure count only
       bool txOk = LoRa.endPacket(false);
+      loraDio0Fired = false;  // TX done, not a packet
       vitalSigns.endTx(txOk);
       if (!txOk) {
         result = LORA_TX_FAILED;
@@ -466,6 +505,7 @@ void sendMessage() {
     else if (cadResult == LORA_CHANNEL_BUSY) {
       // 3. CHANNEL BUSY HANDLING
       // If the Fish Tank or Sump is currently talking, we wait a moment
+      linkHealth.noteBusy(avgRssi);
       retries++;
       if (retries < MAX_RETRIES) {
         int backoff = random(MIN_BACKOFF, MAX_BACKOFF); // Keep backoff short for responsiveness
@@ -482,9 +522,122 @@ void sendMessage() {
     }
   }
 
+  // 2026-11-10: every outcome is counted - a send abandoned on a busy channel used to vanish
+  if (result == LORA_OK) {
+    linkHealth.noteSendResult(LINK_HEALTH_SENT);
+  } else if (result == LORA_MAX_RETRIES_REACHED) {
+    linkHealth.noteSendResult(LINK_HEALTH_BUSY);
+    vitalSigns.noteTxFailed();  // as Daffodil: VitalSigns' loraTxFailCount includes busy-channel give-ups
+  } else {
+    linkHealth.noteSendResult(LINK_HEALTH_FAILED);
+  }
+
   // 4. RETURN TO RECEIVE MODE IMMEDIATELY
   // This is vital so we don't miss the next incoming sensor packet
   LoRa_rxMode();
+}
+
+// ---- Link health helpers (2026-11-10) ----
+
+uint32_t linkHealthNowSec() {
+  return millis() / 1000;  // always on: millis() is the clock (wraps after 49 days, ages only)
+}
+
+void noteGatewayPacket(int rssi, float snr) {
+  linkHealth.noteGateway(rssi, snr, linkHealthNowSec());
+}
+
+void noteNeighbour(const uint8_t *serial, int rssi, float snr) {
+  linkHealth.noteNeighbour(serial, rssi, snr, linkHealthNowSec());
+}
+
+// Sends one record with the same busy-channel check as the data packet, then back to receive.
+bool sendLoraRecord(const uint8_t *data, size_t len) {
+  LoRa_txMode();
+  bool sent = false;
+  for (int retries = 0; retries < MAX_RETRIES && !sent; retries++) {
+    LoRaError r = performCAD();
+    if (r == LORA_OK) {
+      LoRa.beginPacket();
+      LoRa.write(data, len);
+      sent = LoRa.endPacket(false);
+      loraDio0Fired = false;  // TX done, not a packet
+      break;
+    } else if (r == LORA_CHANNEL_BUSY) {
+      linkHealth.noteBusy(avgRssi);
+      delay(random(MIN_BACKOFF, MAX_BACKOFF));
+    } else {
+      break;
+    }
+  }
+  LoRa_rxMode();
+  return sent;
+}
+
+void sendLinkHealth() {
+  LinkHealthRecord r = linkHealth.build(linkHealthNowSec(), millis() / 1000);
+  memcpy(r.serialnumberarray, chinampaData.serialnumberarray, 8);
+  r.totpcode = secretManager.generateCode();
+  linkHealthSeal(r);
+  bool sent = sendLoraRecord((const uint8_t *)&r, sizeof(r));
+  Serial.printf("LinkHealth #%u %s\n", r.seq, sent ? "sent" : "not sent (channel busy)");
+}
+
+// Paula's (or Annabelle's) signal-survey ping - answered as Daffodil does (Daffodil.ino handlePing):
+// checked like a command (checksum, code for senderTime, clock within 15 min, newer than the last),
+// answered with a LinkAckRecord in this device's own slot so answers don't collide.
+void handlePing(const DeviceCommandRecord &c, int rssi, float snr) {
+  if (deviceCommandChecksum(c) != c.checksum) return;
+  if (c.senderTime == 0 || secretManager.generateCodeAt(c.senderTime) != c.totpcode) {
+    Serial.println("ping: code does not match senderTime");
+    return;
+  }
+  long now = timeManager.getTimeForCodeGeneration(currentTimerRecord);
+  if (labs((long)c.senderTime - now) > DEVICE_COMMAND_MAX_CLOCK_DIFF_SEC) {
+    Serial.printf("ping: sender clock %ld s off\n", (long)c.senderTime - now);
+    return;
+  }
+  if (c.senderTime <= lastPingSenderTime) return;  // the same ping again
+  lastPingSenderTime = c.senderTime;
+  LinkAckRecord a;
+  a.probeTime = c.senderTime;
+  a.probeSeq = (uint16_t)(c.reserved[0] | (c.reserved[1] << 8));
+  memcpy(a.serialnumberarray, chinampaData.serialnumberarray, 8);
+  for (size_t i = 0; i < sizeof(a.devicename) - 1 && i < sizeof(chinampaData.devicename) && chinampaData.devicename[i]; i++) {
+    a.devicename[i] = chinampaData.devicename[i];
+  }
+  a.kind = LINK_ACK_KIND_CHINAMPA;
+  a.probeRssi = (int16_t)rssi;
+  a.probeSnrQ = (int8_t)lroundf(snr * 4);
+  int16_t gRssi;
+  int8_t gSnrQ;
+  uint16_t gAge;
+  if (linkHealth.gateway(gRssi, gSnrQ, gAge, linkHealthNowSec())) {
+    a.gatewayRssi = gRssi;
+    a.gatewaySnrQ = gSnrQ;
+    a.gatewayAgeSec = gAge;
+  }
+  a.latitude = chinampaData.latitude;
+  a.longitude = chinampaData.longitude;
+  linkAckSeal(a);
+  pendingLinkAck = a;
+  linkAckDueMs = loraRxAtMs + linkAckDelayMs(a.serialnumberarray, false);  // from arrival
+  linkAckPending = true;
+  Serial.printf("ping #%u heard at %d dBm - answering\n", a.probeSeq, rssi);
+}
+
+// Called every loop(): the ping answer once its slot has come, the LinkHealthRecord once the gap
+// after VitalSigns has passed.
+void sendPendingLoraRecords() {
+  if (!loraActive) return;
+  if (linkAckPending && (int32_t)(millis() - linkAckDueMs) >= 0) {
+    linkAckPending = false;
+    sendLoraRecord((const uint8_t *)&pendingLinkAck, sizeof(pendingLinkAck));
+  }
+  if (linkHealthPending && (int32_t)(millis() - linkHealthDueMs) >= 0) {
+    linkHealthPending = false;
+    sendLinkHealth();
+  }
 }
 
 void sendMessage11() {
@@ -1100,8 +1253,10 @@ void sendVitalSigns() {
       LoRa.beginPacket();
       LoRa.write((uint8_t *)&record, sizeof(record));
       sent = LoRa.endPacket(false);
+      loraDio0Fired = false;  // TX done, not a packet
       break;
     } else if (cadResult == LORA_CHANNEL_BUSY) {
+      linkHealth.noteBusy(avgRssi);
       delay(random(MIN_BACKOFF, MAX_BACKOFF));
     } else {
       break;
@@ -1110,6 +1265,9 @@ void sendVitalSigns() {
   LoRa_rxMode();
   if (sent) vitalSigns.markSent();
   lastVitalSignsMs = millis();
+  // The LinkHealthRecord follows, sent from loop() once Annabelle has had time to read this one.
+  linkHealthPending = true;
+  linkHealthDueMs = millis() + LINK_HEALTH_GAP_MS;
 }
 
 void eventLog(const String &msg) {
@@ -1378,11 +1536,9 @@ void setup() {
   microTempSensor.begin();
   microTempSensor.setWaitForConversion(false);  // Don't block during conversion
   microTempSensor.setResolution(9);
-  microTempSensor.getAddress(chinampaData.serialnumberarray, 0);
-  for (uint8_t i = 0; i < 8; i++) {
-    //if (address[i] < 16) Serial.print("0");
-    serialNumber += String(chinampaData.serialnumberarray[i], HEX);
-  }
+  // 2026-10-30: the serial number is the efuse MAC, as the factory records it (was this sensor's ID)
+  DeviceSerial::fill(chinampaData.serialnumberarray);
+  serialNumber = DeviceSerial::toString(chinampaData.serialnumberarray);
 
   Serial.print("serial number:");
   Serial.println(serialNumber);
@@ -1439,8 +1595,9 @@ void setup() {
     chinampaData.loraActive = loraActive;
   }
 
-    LoRa.setTxPower(17);
-    LoRa.setSpreadingFactor(9);
+    LoRa.setTxPower(LORA_TX_POWER_DBM);
+    LoRa.setSpreadingFactor(LORA_SPREADING_FACTOR);
+    linkHealth.begin(LORA_TX_POWER_DBM, LORA_SPREADING_FACTOR, sizeof(ChinampaData));
     LoRa.enableCrc();
     LoRa.setSignalBandwidth(125E3);
   FastLED.show();
@@ -1560,8 +1717,13 @@ void loop() {
     if (packetSize > 0) {
       loraPacketSize = packetSize;
       loraReceived = true;
+      loraRxAtMs = millis();
+      linkHealth.noteRxPacket();
     } else {
-      LoRa_rxMode();  // DIO0 without a good packet (CRC error, TxDone): back to continuous receive
+      // Every TX clears loraDio0Fired after its TX done, so this is a packet that failed its CRC
+      // (a collision, or a sender too weak - or too close and overloading the receiver).
+      linkHealth.noteRxCrcError();
+      LoRa_rxMode();  // back to continuous receive
     }
   }
   if (clockTicked) {
@@ -1576,11 +1738,17 @@ void loop() {
     chinampaData.secondsSinceLastFishTankData++;
     chinampaData.secondsSinceLastSumpTroughData++;
     dsUploadTimer.tick();
+    // Idle-channel noise, once a second - only while nothing is waiting to be read
+    if (loraActive && !loraDio0Fired && !loraReceived) linkHealth.noteNoiseSample(LoRa.rssi());
     checkWifi();
     if (currentTimerRecord.hour != loraRxHour) {  // hour changed (robust to a missed :00 tick)
       if (loraRxHour != 255) {
+        const LinkHealthRecord &t = linkHealth.totals();
         eventLog("lora rx last hour: fish=" + String(loraRxFish) + " sump=" + String(loraRxSump) + " other=" + String(loraRxOther) +
-                 " | wifi drops since boot=" + String(wifiDropCount));
+                 " | wifi drops since boot=" + String(wifiDropCount) +
+                 " | lora tx since boot: scheduled=" + String(t.dataScheduled) + " sent=" + String(t.dataSent) +
+                 " busy=" + String(t.busyAbandoned) + " failed=" + String(t.txFailed) + " missed=" + String(t.slotsMissed) +
+                 " crcErrors=" + String(t.rxCrcErrors));
       }
       loraRxHour = currentTimerRecord.hour;
       loraRxFish = loraRxSump = loraRxOther = 0;
@@ -1664,7 +1832,6 @@ void loop() {
   FastLED.show();
   if (currentTimerRecord.second == 0 || currentTimerRecord.second == 30) {
     // leds[5] = CRGB(0, 255, 0);
-    sendMessageNow = true;
 
     FastLED.show();
     const uint8_t fish[] = {
@@ -1723,20 +1890,11 @@ void loop() {
     }
 
   } else if (currentTimerRecord.second == 5 || currentTimerRecord.second == 25 || currentTimerRecord.second == 45) {
-
-    if (loraActive && sendMessageNow) {
-      leds[1] = CRGB(0, 0, 255);
-      FastLED.show();
-      sendMessage();
-      sendMessageNow = false;
-      if (vitalSigns.resetReportPending() || millis() - lastVitalSignsMs > VITAL_SIGNS_INTERVAL_MS) {
-        sendVitalSigns();
-      }
-      leds[1] = CRGB(0, 255, 0);
-      FastLED.show();
-    }
+    // 2026-11-10: the data packet no longer goes out on these exact seconds - a loop busy through
+    // the whole second (WiFi pull, serial read, VitalSigns back-off) skipped it without a trace.
+    // See the send timer after this display chain. This branch stays so the display cycle (and
+    // the alert at :25 not showing) is unchanged.
   } else if (currentTimerRecord.second == 10 || currentTimerRecord.second == 40) {
-    sendMessageNow = true;
     // leds[4] = CRGB(0, 255, 0);
     FastLED.show();
     const uint8_t fflo[] = {
@@ -1755,7 +1913,6 @@ void loop() {
 
   } else if (currentTimerRecord.second == 20 || currentTimerRecord.second == 50) {
 
-    sendMessageNow = true;
 
     const uint8_t t2[] = {
       TSEG_B | TSEG_C | TSEG_D | TSEG_E | TSEG_F,  // U
@@ -1795,6 +1952,28 @@ void loop() {
     delay(100);
   }
 
+  // Data packet every LORA_SEND_INTERVAL_MS (2026-11-10, was: at clock seconds 5/25/45). A late
+  // loop sends late instead of skipping, and whole intervals that passed unsent are counted as
+  // missed slots (LinkHealthRecord.slotsMissed).
+  if (loraActive) {
+    unsigned long elapsed = millis() - lastLoraSendMs;
+    if (lastLoraSendMs == 0 || elapsed >= LORA_SEND_INTERVAL_MS) {
+      if (lastLoraSendMs != 0 && elapsed >= 2 * LORA_SEND_INTERVAL_MS) {
+        linkHealth.noteSlotsMissed(elapsed / LORA_SEND_INTERVAL_MS - 1);
+      }
+      lastLoraSendMs = millis();
+      leds[1] = CRGB(0, 0, 255);
+      FastLED.show();
+      sendMessage();
+      if (vitalSigns.resetReportPending() || millis() - lastVitalSignsMs > VITAL_SIGNS_INTERVAL_MS) {
+        sendVitalSigns();
+      }
+      leds[1] = CRGB(0, 255, 0);
+      FastLED.show();
+    }
+  }
+  sendPendingLoraRecords();
+
   if (Serial.available() != 0) {
     String command = Serial.readString();
     Serial.print(F("command="));
@@ -1802,6 +1981,9 @@ void loop() {
     if (command.startsWith("GetEventLog")) {
       printEventLog();
       Serial.println("Ok-GetEventLog");
+    } else if (command.startsWith("GetLinkHealth")) {
+      linkHealth.printJson(Serial, linkHealthNowSec());
+      Serial.println("Ok-GetLinkHealth");
     } else if (command.startsWith("ClearEventLog")) {
       if (fsMounted) {
         LittleFS.remove(EVENT_LOG_FILE);

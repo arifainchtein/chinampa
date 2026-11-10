@@ -1,0 +1,11 @@
+# Kept out of the repo - ProjectWallLabelMaker commits with "git add -A" on every export (2026-11-10)
+build/
+claude/
+.vscode/
+data/
+*.pdf
+*.odg
+*.odt
+*.JPG
+*.jpg
+*.bak-*
