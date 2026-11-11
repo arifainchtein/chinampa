@@ -191,6 +191,12 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 //String display1TempURL = "http://Tlaloc.local/TeleonomeServlet?formName=GetDeneWordValueByIdentity&identity=Tlaloc:Purpose:Sensor%20Data:Indoor%20Temperature:Indoor%20Temperature%20Data";
 String display1TempURL = "http://192.168.1.117/TeleonomeServlet?formName=GetDeneWordValueByIdentity&identity=Tlaloc:Purpose:Sensor%20Data:Indoor%20Temperature:Indoor%20Temperature%20Data";
 String timezone;
+
+// The web page saved GPS coordinates (ChinampaWifiManager SetGPS, web server task): keep them, with the
+// name and timezone already configured (2026-11-11 - before, SetGPS only changed RAM).
+void onGpsSaved(float latitude, float longitude) {
+  secretManager.saveDeviceConfig(String(chinampaData.devicename), String(chinampaData.deviceshortname), timezone, latitude, longitude);
+}
 /********************************************************************/
 
 #define TEMPERATURE 27
@@ -276,9 +282,30 @@ void processLora(int packetSize) {
     DigitalStablesData tempData;
     memset(&tempData, 0, sizeof(DigitalStablesData));
      LoRa.readBytes((uint8_t *)&tempData, sizeof(DigitalStablesData));
-     
-    memcpy(tempData.sentbyarray, "Chinamp", 8);  
-    sendDSDMessage(tempData);
+
+    // Relay with sentbyarray = "Chinamp" (2026-11-11). The checksum covers sentbyarray, so it is
+    // recomputed after the stamp - before this every Daffodil packet Chinampa relayed failed
+    // Annabelle's checksum, so Chinampa never worked as a relay. Only a packet that checked out as
+    // received is relayed (recomputing a corrupted one's checksum would make it look good), and only
+    // one heard first-hand: a packet that already carries a sentby was relayed by someone else, and
+    // sending it again could bounce it between two relays.
+    {
+      const uint8_t *raw = (const uint8_t *)&tempData;
+      size_t checksumOffset = offsetof(DigitalStablesData, checksum);
+      uint8_t sum = 0;
+      for (size_t i = 0; i < sizeof(DigitalStablesData); i++) if (i != checksumOffset) sum ^= raw[i];
+      bool firstHand = true;
+      for (int i = 0; i < 8; i++) if (tempData.sentbyarray[i] != 0) firstHand = false;
+      if (sum == tempData.checksum && firstHand) {
+        DigitalStablesData relayed = tempData;
+        memcpy(relayed.sentbyarray, "Chinamp", 8);
+        const uint8_t *r = (const uint8_t *)&relayed;
+        sum = 0;
+        for (size_t i = 0; i < sizeof(DigitalStablesData); i++) if (i != checksumOffset) sum ^= r[i];
+        relayed.checksum = sum;
+        sendDSDMessage(relayed);
+      }
+    }
    
     tempData.devicename[sizeof(tempData.devicename) - 1] = '\0';
     Serial.println("received from " + String(tempData.devicename));
@@ -373,38 +400,93 @@ void processLora(int packetSize) {
   }
 }
 
+// ---- Is the channel busy? (2026-11-10) ----
+// Until now: busy when 4 RSSI readings averaged above a fixed -85 dBm. RSSI is ANY energy on 433 MHz -
+// pump motors, relays and other greenhouse noise count as much as a LoRa radio - so a noisy greenhouse
+// made almost every send back off 5 times and then be dropped without a trace, while the LED still
+// went blue. Now:
+//   1. the SX1276's own Channel Activity Detection: it looks for a LoRa preamble, which noise doesn't
+//      have (~4.4 ms at SF9 / 125 kHz). The library has no CAD call, so its registers are reached
+//      directly, over the same SPI bus with the library's own settings (LoRa.cpp singleTransfer).
+//   2. CAD can miss a packet already past its preamble, so a strong reading still counts as busy -
+//      but against the noise floor this radio actually measures (noiseFloorDbm, learned once a second
+//      while idle), not a fixed -85: busy above max(-85, floor + 12 dB).
+// And sendMessage() no longer drops the packet when the channel stays busy (see there).
+#define CAD_TIMEOUT_MS 50
+#define BUSY_MARGIN_DB 12
+float noiseFloorDbm = -110;    // smoothed idle-channel RSSI, updated by noteNoiseFloor()
+
+uint8_t loraReadReg(uint8_t address) {
+  digitalWrite(LoRa_SS, LOW);
+  SPI.beginTransaction(SPISettings(LORA_DEFAULT_SPI_FREQUENCY, MSBFIRST, SPI_MODE0));
+  SPI.transfer(address & 0x7f);
+  uint8_t v = SPI.transfer(0x00);
+  SPI.endTransaction();
+  digitalWrite(LoRa_SS, HIGH);
+  return v;
+}
+
+void loraWriteReg(uint8_t address, uint8_t value) {
+  digitalWrite(LoRa_SS, LOW);
+  SPI.beginTransaction(SPISettings(LORA_DEFAULT_SPI_FREQUENCY, MSBFIRST, SPI_MODE0));
+  SPI.transfer(address | 0x80);
+  SPI.transfer(value);
+  SPI.endTransaction();
+  digitalWrite(LoRa_SS, HIGH);
+}
+
+// 1 = a LoRa transmission is on the air, 0 = none, -1 = the radio never reported CAD done.
+// Leaves the radio in standby.
+int loraChannelActivity() {
+  LoRa.idle();                                                      // CAD starts from standby
+  loraWriteReg(REG_IRQ_FLAGS, IRQ_CAD_DONE_MASK | IRQ_CAD_DETECTED_MASK);
+  loraWriteReg(REG_OP_MODE, MODE_CAD);
+  unsigned long start = millis();
+  uint8_t flags = 0;
+  while (!((flags = loraReadReg(REG_IRQ_FLAGS)) & IRQ_CAD_DONE_MASK)) {
+    if (millis() - start > CAD_TIMEOUT_MS) {
+      LoRa.idle();
+      return -1;
+    }
+  }
+  loraWriteReg(REG_IRQ_FLAGS, IRQ_CAD_DONE_MASK | IRQ_CAD_DETECTED_MASK);
+  LoRa.idle();
+  return (flags & IRQ_CAD_DETECTED_MASK) ? 1 : 0;
+}
+
+// Once a second with the idle-channel sample (loop): a slow average, so a packet arriving during a
+// sample barely moves it, and samples well above it (a packet) are left out altogether.
+void noteNoiseFloor(int rssi) {
+  if (rssi > noiseFloorDbm + 20) return;
+  noiseFloorDbm += (rssi - noiseFloorDbm) * 0.05f;
+}
+
+float busyThresholdDbm() {
+  float t = noiseFloorDbm + BUSY_MARGIN_DB;
+  return t > RSSI_THRESHOLD ? t : RSSI_THRESHOLD;
+}
+
 LoRaError performCAD() {
   if (!loraActive) {
     return LORA_INIT_FAILED;
   }
+  int cad = loraChannelActivity();
+  if (cad < 0) Serial.println("CAD: no answer from the radio - going by RSSI only");
 
-  // 1. Prepare for a clean reading
-  LoRa.idle();   
-  LoRa.receive(); 
-  
-  // 2. Faster Sampling
-  // We reduce the delay and sample count to minimize "blind time"
+  LoRa.receive();
+  delay(1);  // let the receiver settle before reading RSSI
   const int SAMPLES = 4;
   float rssiSum = 0;
-
   for (int i = 0; i < SAMPLES; i++) {
     rssiSum += LoRa.rssi();
-    delayMicroseconds(500); // Very fast check
+    delayMicroseconds(500);
   }
-
   avgRssi = rssiSum / SAMPLES;
+  LoRa.idle();
 
-  // 3. Forgiving Threshold
-  // Using -85 allows the system to ignore background greenhouse noise
-  // but still detect another LoRa unit nearby.
-  if (avgRssi > -85) { 
-    
-    LoRa.idle();
+  if (cad == 1 || avgRssi > busyThresholdDbm()) {
     return LORA_CHANNEL_BUSY;
   }
-
-  // Clear for transmission
-
   errorManager.clearLoRaError(LORA_CHANNEL_BUSY);
   return LORA_OK;
 }
@@ -472,6 +554,7 @@ void sendMessage() {
   int retries = 0;
   boolean keepGoing = true;
   long startsendingtime = millis();
+  bool sendAnyway = false;  // 2026-11-10: busy on every check -> send regardless, don't drop it
   linkHealth.noteSendScheduled();
 
   // 1. SWITCH TO TX MODE
@@ -479,8 +562,8 @@ void sendMessage() {
 
   while (keepGoing) {
     // Check if the channel is clear
-    cadResult = performCAD();
-    
+    cadResult = sendAnyway ? LORA_OK : performCAD();
+
     if (cadResult == LORA_OK) {
       // 2. TRANSMIT ONCE (The original code sent twice, causing "deafness")
       LoRa.beginPacket();
@@ -512,8 +595,11 @@ void sendMessage() {
        // if(debug) Serial.println("Channel busy, retrying in " + String(backoff) + "ms");
         delay(backoff);
       } else {
-        result = LORA_MAX_RETRIES_REACHED;
-        keepGoing = false;
+        // 2026-11-10: busy on all MAX_RETRIES checks. It used to give up here, silently - the data
+        // packet was lost. Now it goes out anyway: a rare collision costs less than a certain loss
+        // (LoRaWAN devices never listen first at all). Counted, so the diagnosis still sees it.
+        linkHealth.noteBusyExhausted();
+        sendAnyway = true;
       }
     } else {
       // Hardware error
@@ -525,9 +611,6 @@ void sendMessage() {
   // 2026-11-10: every outcome is counted - a send abandoned on a busy channel used to vanish
   if (result == LORA_OK) {
     linkHealth.noteSendResult(LINK_HEALTH_SENT);
-  } else if (result == LORA_MAX_RETRIES_REACHED) {
-    linkHealth.noteSendResult(LINK_HEALTH_BUSY);
-    vitalSigns.noteTxFailed();  // as Daffodil: VitalSigns' loraTxFailCount includes busy-channel give-ups
   } else {
     linkHealth.noteSendResult(LINK_HEALTH_FAILED);
   }
@@ -1001,6 +1084,39 @@ void readSensorData() {
       Serial.println("line 468");
       keepgoing = false;
     }
+  }
+
+  // ---- Sump above its maximum: close the fish tank outflow solenoid (2026-11-12) ----
+  // The night of 2026-11-11 the sump pond overflowed: the solenoid stayed open, and the only check on it
+  // (outflow flow < 2 L/min, alert 4) relies on a flow meter that does not read reliably, and only lights
+  // LEDs. So whatever the fish tank level says, the solenoid is not allowed to keep feeding a sump that
+  // is already above its maximum. Same convention as the other levels: measuredHeight is the distance
+  // from the sensor to the water, so water above the maximum means measured < height - maximum. Only
+  // with fresh sump data and a real reading (0 = no reading, handled by alert 8 below). The pump is left
+  // as the branches above set it - running it moves sump water up into the fish tank.
+  static bool sumpOverMaxLogged = false;
+  if (chinampaData.secondsSinceLastSumpTroughData <= chinampaData.sumpTroughStaleDataSeconds &&
+      chinampaData.sumpTroughMeasuredHeight > 0 && chinampaData.maximumSumpTroughLevel > 0 &&
+      chinampaData.sumpTroughMeasuredHeight < (chinampaData.sumpTroughHeight - chinampaData.maximumSumpTroughLevel)) {
+    if (chinampaData.fishtankoutflowsolenoidrelaystatus || digitalRead(FISH_OUTPUT_SOLENOID_RELAY)) {
+      sendAMessage = true;
+    }
+    digitalWrite(FISH_OUTPUT_SOLENOID_RELAY, LOW);
+    chinampaData.fishtankoutflowsolenoidrelaystatus = false;
+    leds[5] = CRGB(255, 0, 0);
+    leds[7] = CRGB(255, 0, 255);
+    chinampaData.alertstatus = true;
+    chinampaData.alertcode = 10;
+    Serial.println("sump above maximum, fish solenoid closed, sumpTroughMeasuredHeight=" + String(chinampaData.sumpTroughMeasuredHeight));
+    if (!sumpOverMaxLogged) {
+      eventLog("sump above maximum (measured=" + String(chinampaData.sumpTroughMeasuredHeight) + " height=" + String(chinampaData.sumpTroughHeight) +
+               " max=" + String(chinampaData.maximumSumpTroughLevel) + "), fish solenoid closed");
+      sumpOverMaxLogged = true;
+    }
+    FastLED.show();
+  } else if (sumpOverMaxLogged) {
+    eventLog("sump back below maximum, fish solenoid control resumed");
+    sumpOverMaxLogged = false;
   }
 
 
@@ -1486,6 +1602,10 @@ void setup() {
   double longitude = 144.47472222;
 
   secretManager.getDeviceConfig(chinampaData.devicename, chinampaData.deviceshortname, timezone, latitude, longitude);
+  // The saved position goes into the packet (2026-11-11): until now it was read and dropped, so
+  // chinampaData kept ChinampaData.h's default (-37.17139, 144.48861) whatever was configured.
+  chinampaData.latitude = latitude;
+  chinampaData.longitude = longitude;
   secretManager.saveWifiParameters("SumpTrough", "", "Chinampa", "",  "Chinampa", true);
   double fishq = 63;
   secretManager.getChinampaParameters(fishq);
@@ -1625,6 +1745,7 @@ void setup() {
 
   if (!initiatedWifi) {
     Serial.print(F("Before Starting Wifi"));
+    wifiManager.setGpsSavedCallback(onGpsSaved);  // the page's GPS form is kept across reboots (2026-11-11)
     wifiManager.start();
     initiatedWifi = true;
   }
@@ -1739,7 +1860,11 @@ void loop() {
     chinampaData.secondsSinceLastSumpTroughData++;
     dsUploadTimer.tick();
     // Idle-channel noise, once a second - only while nothing is waiting to be read
-    if (loraActive && !loraDio0Fired && !loraReceived) linkHealth.noteNoiseSample(LoRa.rssi());
+    if (loraActive && !loraDio0Fired && !loraReceived) {
+      int idleRssi = LoRa.rssi();
+      linkHealth.noteNoiseSample(idleRssi);
+      noteNoiseFloor(idleRssi);  // the busy-channel threshold (performCAD)
+    }
     checkWifi();
     if (currentTimerRecord.hour != loraRxHour) {  // hour changed (robust to a missed :00 tick)
       if (loraRxHour != 255) {
@@ -1747,7 +1872,7 @@ void loop() {
         eventLog("lora rx last hour: fish=" + String(loraRxFish) + " sump=" + String(loraRxSump) + " other=" + String(loraRxOther) +
                  " | wifi drops since boot=" + String(wifiDropCount) +
                  " | lora tx since boot: scheduled=" + String(t.dataScheduled) + " sent=" + String(t.dataSent) +
-                 " busy=" + String(t.busyAbandoned) + " failed=" + String(t.txFailed) + " missed=" + String(t.slotsMissed) +
+                 " busyExhausted=" + String(t.busyExhausted) + " failed=" + String(t.txFailed) + " missed=" + String(t.slotsMissed) +
                  " crcErrors=" + String(t.rxCrcErrors));
       }
       loraRxHour = currentTimerRecord.hour;
@@ -2041,6 +2166,8 @@ void loop() {
       deviceshortname.toCharArray(chinampaData.deviceshortname, deviceshortname.length() + 1);
 
       secretManager.saveDeviceConfig(devicename, deviceshortname, timezone, latitude, longitude);
+      chinampaData.latitude = latitude;  // live now, not only after a reboot (2026-11-11)
+      chinampaData.longitude = longitude;
 
       Serial.println(F("Ok-SetDeviceSensorConfig"));
     } else if (command.startsWith("SetDeviceName")) {
